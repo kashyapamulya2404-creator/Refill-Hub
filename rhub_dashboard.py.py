@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.figure_factory as ff
 from plotly.subplots import make_subplots
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -11,11 +12,13 @@ from sklearn.preprocessing import StandardScaler, OneHotEncoder, LabelEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.cluster import KMeans
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (classification_report, silhouette_score, r2_score, 
                             mean_squared_error, confusion_matrix, roc_curve, auc, 
-                            precision_recall_curve)
+                            precision_recall_curve, accuracy_score, precision_score, 
+                            recall_score, f1_score)
 from mlxtend.frequent_patterns import apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 from scipy import stats
@@ -33,7 +36,7 @@ warnings.filterwarnings('ignore')
 # PAGE CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="ReFill Hub: Advanced BI Dashboard",
+    page_title="ReFill Hub: Ultimate Analytics Platform",
     page_icon="♻️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -73,14 +76,17 @@ st.markdown("""
         color: #2E8B57;
         font-weight: 700;
         text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+        font-family: 'Helvetica Neue', sans-serif;
     }
     h2 {
         color: #228B22;
         font-weight: 600;
+        font-family: 'Helvetica Neue', sans-serif;
     }
     h3 {
         color: #3CB371;
         font-weight: 500;
+        font-family: 'Helvetica Neue', sans-serif;
     }
     
     /* Enhanced containers */
@@ -105,11 +111,6 @@ st.markdown("""
         background: linear-gradient(135deg, #228B22 0%, #2E8B57 100%);
         box-shadow: 0 6px 12px rgba(46, 139, 87, 0.3);
         transform: translateY(-2px);
-    }
-    
-    /* Download button special styling */
-    .download-btn {
-        background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
     }
     
     /* Info boxes */
@@ -137,6 +138,19 @@ st.markdown("""
         padding: 15px;
         border-radius: 10px;
         margin: 10px 0;
+    }
+    
+    /* Metric card custom */
+    .metric-card {
+        background-color: #FFFFFF;
+        border-radius: 10px;
+        padding: 20px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+        transition: all 0.3s ease;
+    }
+    .metric-card:hover {
+        box-shadow: 0 8px 20px rgba(46, 139, 87, 0.15);
+        transform: translateY(-3px);
     }
     
     /* Tabs styling */
@@ -224,217 +238,6 @@ def generate_synthetic_data(n_samples=600):
     
     return pd.DataFrame(data)
 
-# =============================================================================
-# DATA LOADING & PREPROCESSING (CACHED)
-# =============================================================================
-@st.cache_data
-def load_and_clean_data(filepath=None, uploaded_file=None, use_synthetic=False):
-    """
-    Loads and cleans the dataset from filepath, uploaded file, or generates synthetic data
-    """
-    if use_synthetic:
-        df = generate_synthetic_data()
-        st.success("✅ Synthetic data generated successfully!")
-    elif uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.success("✅ Custom data uploaded successfully!")
-        except Exception as e:
-            st.error(f"Error reading uploaded file: {str(e)}")
-            return None, None, None, None
-    elif filepath:
-        try:
-            df = pd.read_csv(filepath)
-        except FileNotFoundError:
-            st.warning(f"Default data file not found. Generating synthetic data...")
-            df = generate_synthetic_data()
-    else:
-        df = generate_synthetic_data()
-
-    # Basic Cleaning
-    df.columns = df.columns.str.strip()
-    for col in df.select_dtypes(['object']).columns:
-        df[col] = df[col].str.strip()
-        
-    # Feature Engineering
-    def process_family_size(val):
-        if '5+' in str(val): return 5
-        if '1-2' in str(val): return 1.5
-        if '3-4' in str(val): return 3.5
-        return val
-    df['Family_Size_Num'] = df['Family_Size'].apply(process_family_size)
-    
-    # Extract discount percentage
-    df['Discount_Percent'] = df['Discount_Switch'].str.extract('(\d+)').astype(float)
-    
-    # Define feature lists
-    categorical_features = ['Age_Group', 'Gender', 'Emirate', 'Occupation', 'Income', 
-                            'Purchase_Location', 'Purchase_Frequency', 'Uses_Eco_Products',
-                            'Preferred_Packaging', 'Aware_Plastic_Ban', 'Eco_Brand_Preference', 
-                            'Follow_Campaigns', 'Used_Refill_Before', 'Preferred_Payment_Mode',
-                            'Refill_Location', 'Container_Type', 'Interest_Non_Liquids', 'Discount_Switch']
-
-    numerical_features = ['Family_Size_Num', 'Importance_Convenience', 'Importance_Price', 
-                          'Importance_Sustainability', 'Reduce_Waste_Score', 'Social_Influence_Score', 
-                          'Try_Refill_Likelihood']
-
-    cluster_features = ['Importance_Convenience', 'Importance_Price', 'Importance_Sustainability', 
-                        'Reduce_Waste_Score', 'Eco_Brand_Preference', 'Social_Influence_Score']
-
-    return df, categorical_features, numerical_features, cluster_features
-
-# =============================================================================
-# ADVANCED MODEL TRAINING (CACHED)
-# =============================================================================
-@st.cache_resource
-def train_all_models(df, categorical_features, numerical_features, cluster_features):
-    """
-    Trains all ML models with enhanced metrics and feature importance
-    """
-    models = {}
-    metrics = {}
-    
-    # --- CLASSIFICATION ---
-    X_class = df[categorical_features + numerical_features]
-    y_class = df['Likely_to_Use_ReFillHub'].map({'Yes': 1, 'No': 0})
-    
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', StandardScaler(), numerical_features),
-            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
-        ])
-
-    clf_pipeline = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('classifier', RandomForestClassifier(random_state=42, n_estimators=200, max_depth=15))
-    ])
-    
-    X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
-        X_class, y_class, test_size=0.2, random_state=42, stratify=y_class
-    )
-    clf_pipeline.fit(X_train_c, y_train_c)
-    y_pred_c = clf_pipeline.predict(X_test_c)
-    y_pred_proba_c = clf_pipeline.predict_proba(X_test_c)[:, 1]
-    
-    models['classification'] = clf_pipeline
-    metrics['classification_report'] = classification_report(y_test_c, y_pred_c, output_dict=True)
-    metrics['confusion_matrix'] = confusion_matrix(y_test_c, y_pred_c)
-    
-    # ROC Curve
-    fpr, tpr, _ = roc_curve(y_test_c, y_pred_proba_c)
-    metrics['roc_auc'] = auc(fpr, tpr)
-    metrics['roc_curve'] = (fpr, tpr)
-    
-    # Feature Importance
-    feature_names = (numerical_features + 
-                    clf_pipeline.named_steps['preprocessor']
-                    .named_transformers_['cat']
-                    .get_feature_names_out(categorical_features).tolist())
-    
-    importances = clf_pipeline.named_steps['classifier'].feature_importances_
-    feature_importance_df = pd.DataFrame({
-        'Feature': feature_names,
-        'Importance': importances
-    }).sort_values('Importance', ascending=False).head(20)
-    models['feature_importance_clf'] = feature_importance_df
-    
-    # Cross-validation score
-    cv_scores = cross_val_score(clf_pipeline, X_class, y_class, cv=5, scoring='accuracy')
-    metrics['cv_mean'] = cv_scores.mean()
-    metrics['cv_std'] = cv_scores.std()
-
-    # --- REGRESSION ---
-    X_reg = df[categorical_features + numerical_features]
-    y_reg = df['Willingness_to_Pay_AED']
-    
-    reg_pipeline = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('regressor', RandomForestRegressor(random_state=42, n_estimators=200, max_depth=15))
-    ])
-
-    X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(
-        X_reg, y_reg, test_size=0.2, random_state=42
-    )
-    reg_pipeline.fit(X_train_r, y_train_r)
-    y_pred_r = reg_pipeline.predict(X_test_r)
-    
-    models['regression'] = reg_pipeline
-    metrics['r2_score'] = r2_score(y_test_r, y_pred_r)
-    metrics['rmse'] = np.sqrt(mean_squared_error(y_test_r, y_pred_r))
-    metrics['mae'] = np.mean(np.abs(y_test_r - y_pred_r))
-    
-    # Feature importance for regression
-    importances_reg = reg_pipeline.named_steps['regressor'].feature_importances_
-    feature_importance_reg_df = pd.DataFrame({
-        'Feature': feature_names,
-        'Importance': importances_reg
-    }).sort_values('Importance', ascending=False).head(20)
-    models['feature_importance_reg'] = feature_importance_reg_df
-    
-    # Store predictions for residual analysis
-    metrics['y_test_reg'] = y_test_r
-    metrics['y_pred_reg'] = y_pred_r
-
-    # --- CLUSTERING ---
-    X_cluster = df[cluster_features]
-    cluster_scaler = StandardScaler()
-    X_cluster_scaled = cluster_scaler.fit_transform(X_cluster)
-    
-    # Determine optimal clusters using elbow method
-    inertias = []
-    silhouette_scores = []
-    K_range = range(2, 8)
-    for k in K_range:
-        kmeans_temp = KMeans(n_clusters=k, random_state=42, n_init=10)
-        kmeans_temp.fit(X_cluster_scaled)
-        inertias.append(kmeans_temp.inertia_)
-        silhouette_scores.append(silhouette_score(X_cluster_scaled, kmeans_temp.labels_))
-    
-    metrics['elbow_data'] = (list(K_range), inertias, silhouette_scores)
-    
-    # Use k=4 as optimal
-    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
-    df['Cluster'] = kmeans.fit_predict(X_cluster_scaled)
-    
-    models['clustering_model'] = kmeans
-    models['clustering_scaler'] = cluster_scaler
-    metrics['silhouette_score'] = silhouette_score(X_cluster_scaled, df['Cluster'])
-    
-    # Enhanced cluster profiles
-    cluster_profiles = df.groupby('Cluster')[cluster_features + ['Likely_to_Use_ReFillHub', 'Willingness_to_Pay_AED']].agg({
-        **{feat: 'mean' for feat in cluster_features},
-        'Likely_to_Use_ReFillHub': lambda x: (x == 'Yes').mean(),
-        'Willingness_to_Pay_AED': 'mean'
-    })
-    models['cluster_profiles'] = cluster_profiles
-    
-    # Cluster sizes
-    models['cluster_sizes'] = df['Cluster'].value_counts().sort_index()
-
-    # --- ASSOCIATION RULES ---
-    transactions = df['Products_Bought'].apply(lambda x: [item.strip() for item in str(x).split(',')]).tolist()
-    te = TransactionEncoder()
-    te_ary = te.fit(transactions).transform(transactions)
-    df_trans = pd.DataFrame(te_ary, columns=te.columns_)
-    
-    frequent_itemsets = apriori(df_trans, min_support=0.05, use_colnames=True)
-    
-    if len(frequent_itemsets) > 0:
-        rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
-        rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
-        rules['consequents'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
-        models['association_rules'] = rules.sort_values('lift', ascending=False)
-    else:
-        models['association_rules'] = pd.DataFrame()
-    
-    models['frequent_itemsets'] = frequent_itemsets
-    
-    return models, metrics, df
-
-# =============================================================================
-# ADVANCED ANALYTICS FUNCTIONS
-# =============================================================================
-
 def calculate_clv(avg_spend, frequency_per_year, retention_rate, years=3):
     """Calculate Customer Lifetime Value"""
     clv = 0
@@ -490,7 +293,7 @@ def generate_business_recommendations(df, models, metrics):
     })
     
     # Recommendation 4: Product Bundle
-    if not models['association_rules'].empty:
+    if 'association_rules' in models and not models['association_rules'].empty:
         top_rule = models['association_rules'].iloc[0]
         recommendations.append({
             'title': '🛒 Product Bundling',
@@ -498,15 +301,228 @@ def generate_business_recommendations(df, models, metrics):
             'priority': 'MEDIUM'
         })
     
-    # Recommendation 5: Feature Priority
-    top_feature = models['feature_importance_clf'].iloc[0]
+    # Recommendation 5: Best Model
+    best_model = max(metrics['classification'], key=lambda x: metrics['classification'][x]['Accuracy'])
     recommendations.append({
-        'title': '⚡ Key Success Factor',
-        'detail': f"Prioritize {top_feature['Feature']} in value proposition (highest importance)",
+        'title': '🤖 Recommended Algorithm',
+        'detail': f"Deploy {best_model} for production (Accuracy: {metrics['classification'][best_model]['Accuracy']:.2%})",
         'priority': 'HIGH'
     })
     
     return recommendations
+
+# =============================================================================
+# DATA LOADING & PREPROCESSING (CACHED)
+# =============================================================================
+@st.cache_data
+def load_and_clean_data(filepath=None, uploaded_file=None, use_synthetic=False):
+    """
+    Loads and cleans the dataset from filepath, uploaded file, or generates synthetic data
+    """
+    if use_synthetic:
+        df = generate_synthetic_data()
+        st.success("✅ Synthetic data generated successfully!")
+    elif uploaded_file is not None:
+        try:
+            df = pd.read_csv(uploaded_file)
+            st.success("✅ Custom data uploaded successfully!")
+        except Exception as e:
+            st.error(f"Error reading uploaded file: {str(e)}")
+            return None, None, None, None
+    elif filepath:
+        try:
+            df = pd.read_csv(filepath)
+        except FileNotFoundError:
+            st.warning(f"Default data file not found. Generating synthetic data...")
+            df = generate_synthetic_data()
+    else:
+        df = generate_synthetic_data()
+
+    # Basic Cleaning
+    df.columns = df.columns.str.strip()
+    for col in df.select_dtypes(['object']).columns:
+        df[col] = df[col].str.strip()
+        
+    # Feature Engineering
+    def process_family_size(val):
+        if '5+' in str(val): return 5
+        if '1-2' in str(val): return 1.5
+        if '3-4' in str(val): return 3.5
+        return 3.0
+    df['Family_Size_Num'] = df['Family_Size'].apply(process_family_size)
+    
+    # Define feature lists
+    categorical_features = ['Age_Group', 'Gender', 'Emirate', 'Occupation', 'Income', 
+                            'Purchase_Location', 'Purchase_Frequency', 'Uses_Eco_Products',
+                            'Preferred_Packaging', 'Aware_Plastic_Ban', 'Eco_Brand_Preference', 
+                            'Follow_Campaigns', 'Used_Refill_Before', 'Preferred_Payment_Mode',
+                            'Refill_Location', 'Container_Type', 'Interest_Non_Liquids', 'Discount_Switch']
+
+    numerical_features = ['Family_Size_Num', 'Importance_Convenience', 'Importance_Price', 
+                          'Importance_Sustainability', 'Reduce_Waste_Score', 'Social_Influence_Score', 
+                          'Try_Refill_Likelihood']
+
+    cluster_features = ['Importance_Convenience', 'Importance_Price', 'Importance_Sustainability', 
+                        'Reduce_Waste_Score', 'Family_Size_Num']
+
+    return df, categorical_features, numerical_features, cluster_features
+
+# =============================================================================
+# COMPREHENSIVE MODEL TRAINING (CACHED)
+# =============================================================================
+@st.cache_resource
+def train_all_models(df, categorical_features, numerical_features, cluster_features):
+    """
+    Trains ALL models: Multiple classifiers, regressors, clustering, and association rules
+    """
+    models = {}
+    metrics = {'classification': {}, 'regression': {}}
+    
+    # --- PREPROCESSING PIPELINE ---
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', StandardScaler(), numerical_features),
+            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features)
+        ])
+    
+    # --- 1. CLASSIFICATION (Multiple Algorithms) ---
+    X_class = df[categorical_features + numerical_features]
+    y_class = df['Likely_to_Use_ReFillHub'].map({'Yes': 1, 'No': 0})
+    
+    X_train_c, X_test_c, y_train_c, y_test_c = train_test_split(
+        X_class, y_class, test_size=0.2, random_state=42, stratify=y_class
+    )
+    
+    classifiers = {
+        "Decision Tree": DecisionTreeClassifier(random_state=42, max_depth=10),
+        "Random Forest": RandomForestClassifier(random_state=42, n_estimators=200, max_depth=15),
+        "Gradient Boosting": GradientBoostingClassifier(random_state=42, n_estimators=100),
+        "Logistic Regression": LogisticRegression(random_state=42, max_iter=1000)
+    }
+    
+    for name, clf in classifiers.items():
+        pipeline = Pipeline(steps=[('preprocessor', preprocessor), ('classifier', clf)])
+        pipeline.fit(X_train_c, y_train_c)
+        y_pred = pipeline.predict(X_test_c)
+        y_pred_proba = pipeline.predict_proba(X_test_c)[:, 1] if hasattr(pipeline, 'predict_proba') else None
+        
+        models[name] = pipeline
+        
+        # Calculate metrics
+        metrics['classification'][name] = {
+            'Accuracy': accuracy_score(y_test_c, y_pred),
+            'Precision': precision_score(y_test_c, y_pred),
+            'Recall': recall_score(y_test_c, y_pred),
+            'F1 Score': f1_score(y_test_c, y_pred),
+            'Confusion Matrix': confusion_matrix(y_test_c, y_pred)
+        }
+        
+        # ROC Curve if available
+        if y_pred_proba is not None:
+            fpr, tpr, _ = roc_curve(y_test_c, y_pred_proba)
+            metrics['classification'][name]['ROC_AUC'] = auc(fpr, tpr)
+            metrics['classification'][name]['ROC_Curve'] = (fpr, tpr)
+    
+    # Store test data for later use
+    metrics['test_data'] = {'X_test': X_test_c, 'y_test': y_test_c}
+    
+    # Feature importance for best model (Random Forest)
+    if 'Random Forest' in models:
+        rf_model = models['Random Forest']
+        feature_names = (numerical_features + 
+                        rf_model.named_steps['preprocessor']
+                        .named_transformers_['cat']
+                        .get_feature_names_out(categorical_features).tolist())
+        
+        importances = rf_model.named_steps['classifier'].feature_importances_
+        feature_importance_df = pd.DataFrame({
+            'Feature': feature_names,
+            'Importance': importances
+        }).sort_values('Importance', ascending=False).head(20)
+        models['feature_importance_clf'] = feature_importance_df
+
+    # --- 2. REGRESSION (Multiple Algorithms) ---
+    X_reg = df[categorical_features + numerical_features]
+    y_reg = df['Willingness_to_Pay_AED']
+    
+    X_train_r, X_test_r, y_train_r, y_test_r = train_test_split(
+        X_reg, y_reg, test_size=0.2, random_state=42
+    )
+    
+    regressors = {
+        "Random Forest": RandomForestRegressor(random_state=42, n_estimators=200, max_depth=15),
+        "Gradient Boosting": GradientBoostingRegressor(random_state=42, n_estimators=100)
+    }
+    
+    for name, reg in regressors.items():
+        pipeline = Pipeline(steps=[('preprocessor', preprocessor), ('regressor', reg)])
+        pipeline.fit(X_train_r, y_train_r)
+        y_pred_r = pipeline.predict(X_test_r)
+        
+        models[f"{name}_Regressor"] = pipeline
+        
+        metrics['regression'][name] = {
+            'R2': r2_score(y_test_r, y_pred_r),
+            'RMSE': np.sqrt(mean_squared_error(y_test_r, y_pred_r)),
+            'MAE': np.mean(np.abs(y_test_r - y_pred_r))
+        }
+    
+    # Store regression test data
+    metrics['regression_test_data'] = {'y_test': y_test_r, 'y_pred': y_pred_r}
+
+    # --- 3. CLUSTERING ---
+    X_cluster = df[cluster_features]
+    cluster_scaler = StandardScaler()
+    X_cluster_scaled = cluster_scaler.fit_transform(X_cluster)
+    
+    # Elbow method data
+    inertias = []
+    silhouette_scores = []
+    K_range = range(2, 8)
+    for k in K_range:
+        kmeans_temp = KMeans(n_clusters=k, random_state=42, n_init=10)
+        kmeans_temp.fit(X_cluster_scaled)
+        inertias.append(kmeans_temp.inertia_)
+        silhouette_scores.append(silhouette_score(X_cluster_scaled, kmeans_temp.labels_))
+    
+    metrics['elbow_data'] = (list(K_range), inertias, silhouette_scores)
+    
+    # Final clustering with k=4
+    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+    df['Cluster'] = kmeans.fit_predict(X_cluster_scaled)
+    
+    models['clustering_model'] = kmeans
+    models['clustering_scaler'] = cluster_scaler
+    metrics['silhouette_score'] = silhouette_score(X_cluster_scaled, df['Cluster'])
+    
+    # Cluster profiles
+    cluster_profiles = df.groupby('Cluster')[cluster_features + ['Likely_to_Use_ReFillHub', 'Willingness_to_Pay_AED']].agg({
+        **{feat: 'mean' for feat in cluster_features},
+        'Likely_to_Use_ReFillHub': lambda x: (x == 'Yes').mean(),
+        'Willingness_to_Pay_AED': 'mean'
+    })
+    models['cluster_profiles'] = cluster_profiles
+    models['cluster_sizes'] = df['Cluster'].value_counts().sort_index()
+
+    # --- 4. ASSOCIATION RULES ---
+    transactions = df['Products_Bought'].apply(lambda x: [item.strip() for item in str(x).split(',')]).tolist()
+    te = TransactionEncoder()
+    te_ary = te.fit(transactions).transform(transactions)
+    df_trans = pd.DataFrame(te_ary, columns=te.columns_)
+    
+    frequent_itemsets = apriori(df_trans, min_support=0.05, use_colnames=True)
+    
+    if len(frequent_itemsets) > 0:
+        rules = association_rules(frequent_itemsets, metric="lift", min_threshold=1.0)
+        rules['antecedents'] = rules['antecedents'].apply(lambda x: ', '.join(list(x)))
+        rules['consequents'] = rules['consequents'].apply(lambda x: ', '.join(list(x)))
+        models['association_rules'] = rules.sort_values('lift', ascending=False)
+    else:
+        models['association_rules'] = pd.DataFrame()
+    
+    models['frequent_itemsets'] = frequent_itemsets
+    
+    return models, metrics, df
 
 # =============================================================================
 # MAIN APP EXECUTION
@@ -523,15 +539,15 @@ def main():
     # =========================================================================
     # SIDEBAR
     # =========================================================================
-    st.sidebar.image("https://via.placeholder.com/400x200/2E8B57/FFFFFF?text=ReFill+Hub+BI", 
+    st.sidebar.image("https://via.placeholder.com/400x200/2E8B57/FFFFFF?text=ReFill+Hub+Analytics", 
                      use_column_width=True)
-    st.sidebar.title("🧭 Navigation")
+    st.sidebar.title("🧭 Navigation Hub")
     
     # Data Source Selection
     st.sidebar.header("📊 Data Source")
     data_source = st.sidebar.radio(
         "Choose data source:",
-        ["Use Default Data", "Upload Custom Data", "Generate New Synthetic Data"],
+        ["Use Default Data", "Upload Custom Data", "Generate Synthetic Data"],
         help="Select how you want to load the data"
     )
     
@@ -544,18 +560,18 @@ def main():
             type=['csv'],
             help="Upload your own survey data in CSV format"
         )
-        if uploaded_file and st.sidebar.button("Load Uploaded Data"):
+        if uploaded_file and st.sidebar.button("📤 Load Uploaded Data"):
             st.session_state.data_loaded = False
     
-    elif data_source == "Generate New Synthetic Data":
+    elif data_source == "Generate Synthetic Data":
         n_samples = st.sidebar.number_input("Number of samples", 100, 2000, 600, 50)
-        if st.sidebar.button("Generate Synthetic Data"):
+        if st.sidebar.button("🎲 Generate Data"):
             use_synthetic = True
             st.session_state.data_loaded = False
     
     # Load data based on selection
     if not st.session_state.data_loaded:
-        with st.spinner("Loading and processing data..."):
+        with st.spinner("🔄 Loading and processing data..."):
             df, cat_features, num_features, cluster_features = load_and_clean_data(
                 filepath='ReFillHub_SyntheticSurvey.csv',
                 uploaded_file=uploaded_file,
@@ -587,6 +603,7 @@ def main():
     cluster_features = st.session_state.cluster_features
     
     # Global Filters
+    st.sidebar.markdown("---")
     st.sidebar.header("🔍 Global Filters")
     with st.sidebar.expander("Apply Filters", expanded=False):
         selected_emirates = st.multiselect(
@@ -617,303 +634,560 @@ def main():
     # Page Selection
     st.sidebar.markdown("---")
     page = st.sidebar.radio(
-        "Select Page:",
+        "📑 Select Page:",
         [
             "🏠 Executive Summary",
-            "📊 Data Explorer & Quality",
-            "🧩 Customer Segmentation",
+            "🤖 Model Performance & Comparison",
             "🔮 Predictive Simulator",
+            "🧩 Customer Segmentation",
             "🛒 Market Basket Analysis",
+            "📊 Data Explorer & Quality",
             "📈 Advanced Analytics",
             "💡 Business Recommendations",
-            "🤖 Model Performance",
             "📥 Export & Download"
         ]
     )
     
     st.sidebar.markdown("---")
     st.sidebar.info(f"**Active Records:** {len(df_filtered):,} / {len(df):,}")
+    st.sidebar.success(f"**Models Trained:** {len(models)} algorithms")
     
     # =========================================================================
     # PAGE 1: EXECUTIVE SUMMARY
     # =========================================================================
     if "Executive Summary" in page:
-        st.title("♻️ ReFill Hub: Executive Summary")
+        st.title("♻️ ReFill Hub: Executive Dashboard")
         st.markdown("""
         <div class='info-box'>
-        <b>🎯 Mission:</b> Provide data-driven intelligence for ReFill Hub launch strategy based on comprehensive market research.
+        <b>🎯 Overview:</b> Comprehensive market intelligence based on {0:,} survey respondents across UAE
         </div>
-        """, unsafe_allow_html=True)
+        """.format(len(df_filtered)), unsafe_allow_html=True)
         
-        # Top Metrics
+        # Top Metrics Row
         st.header("📊 Key Performance Indicators")
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         adoption_rate = (df_filtered['Likely_to_Use_ReFillHub'] == 'Yes').mean() * 100
         avg_wtp = df_filtered['Willingness_to_Pay_AED'].mean()
-        high_value_customers = (df_filtered['Willingness_to_Pay_AED'] > df_filtered['Willingness_to_Pay_AED'].quantile(0.75)).sum()
-        avg_sustainability_score = df_filtered['Importance_Sustainability'].mean()
+        high_value = (df_filtered['Willingness_to_Pay_AED'] > df_filtered['Willingness_to_Pay_AED'].quantile(0.75)).sum()
+        best_accuracy = max(m['Accuracy'] for m in metrics['classification'].values())
         
         with col1:
-            st.metric(
-                "Adoption Rate",
-                f"{adoption_rate:.1f}%",
-                delta=f"{adoption_rate - 50:.1f}% vs. benchmark",
-                help="Percentage of respondents likely to use ReFill Hub"
-            )
-        
+            st.metric("Total Respondents", f"{len(df_filtered):,}")
         with col2:
-            st.metric(
-                "Avg. Willingness to Pay",
-                f"AED {avg_wtp:.2f}",
-                delta=f"±{df_filtered['Willingness_to_Pay_AED'].std():.2f}",
-                help="Average amount customers willing to spend per visit"
-            )
-        
+            st.metric("Adoption Rate", f"{adoption_rate:.1f}%", 
+                     delta=f"{adoption_rate - 50:.1f}% vs. 50%")
         with col3:
-            st.metric(
-                "High-Value Customers",
-                f"{high_value_customers:,}",
-                delta=f"{(high_value_customers/len(df_filtered)*100):.1f}% of total",
-                help="Customers in top 25% spending bracket"
-            )
-        
+            st.metric("Avg. Willingness to Pay", f"AED {avg_wtp:.2f}")
         with col4:
-            st.metric(
-                "Sustainability Score",
-                f"{avg_sustainability_score:.2f}/5",
-                delta="Strong" if avg_sustainability_score > 3.5 else "Moderate",
-                help="Average importance placed on sustainability"
-            )
+            st.metric("High-Value Customers", f"{high_value:,}",
+                     help="Top 25% spending bracket")
+        with col5:
+            st.metric("Best Model Accuracy", f"{best_accuracy:.1%}",
+                     help="Highest performing classifier")
         
         st.markdown("---")
         
-        # Visualizations
+        # Visualizations Row 1
         col_a, col_b = st.columns(2)
         
         with col_a:
-            st.subheader("🎯 Adoption by Demographics")
-            fig_demo = px.sunburst(
-                df_filtered,
-                path=['Emirate', 'Income', 'Likely_to_Use_ReFillHub'],
-                title="Hierarchical View: Location → Income → Adoption",
-                color='Likely_to_Use_ReFillHub',
-                color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'}
+            st.subheader("📍 Adoption by Income Level")
+            fig = px.histogram(
+                df_filtered, 
+                x="Income", 
+                color="Likely_to_Use_ReFillHub",
+                barmode="group",
+                color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'},
+                title="Income Level Impact on Adoption"
             )
-            st.plotly_chart(fig_demo, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
         
         with col_b:
             st.subheader("💰 Spending Distribution")
-            fig_spend = px.box(
+            fig = px.box(
                 df_filtered,
-                x='Likely_to_Use_ReFillHub',
-                y='Willingness_to_Pay_AED',
+                x="Likely_to_Use_ReFillHub",
+                y="Willingness_to_Pay_AED",
+                color="Likely_to_Use_ReFillHub",
+                color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'},
+                title="Willingness to Pay: Adopters vs. Non-Adopters"
+            )
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        # Visualizations Row 2
+        col_c, col_d = st.columns(2)
+        
+        with col_c:
+            st.subheader("🗺️ Geographic Distribution")
+            emirate_counts = df_filtered['Emirate'].value_counts()
+            fig = px.pie(
+                values=emirate_counts.values,
+                names=emirate_counts.index,
+                title="Respondent Distribution by Emirate",
+                color_discrete_sequence=px.colors.sequential.Greens
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col_d:
+            st.subheader("🎯 Purchase Frequency Patterns")
+            freq_data = df_filtered.groupby(['Purchase_Frequency', 'Likely_to_Use_ReFillHub']).size().reset_index(name='count')
+            fig = px.bar(
+                freq_data,
+                x='Purchase_Frequency',
+                y='count',
                 color='Likely_to_Use_ReFillHub',
-                title="Willingness to Pay: Adopters vs. Non-Adopters",
-                color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'}
+                barmode='group',
+                color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'},
+                title="Shopping Frequency vs. Adoption"
             )
-            fig_spend.update_layout(showlegend=False)
-            st.plotly_chart(fig_spend, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True)
         
-        # Geographic Insights
-        st.subheader("🗺️ Geographic Market Potential")
+        # Key Insights
+        st.header("🔍 Key Insights")
+        col_i1, col_i2, col_i3 = st.columns(3)
         
-        emirate_stats = df_filtered.groupby('Emirate').agg({
-            'Likely_to_Use_ReFillHub': lambda x: (x == 'Yes').mean() * 100,
-            'Willingness_to_Pay_AED': 'mean',
-            'Emirate': 'count'
-        }).rename(columns={
-            'Likely_to_Use_ReFillHub': 'Adoption_Rate',
-            'Willingness_to_Pay_AED': 'Avg_Spend',
-            'Emirate': 'Sample_Size'
-        }).reset_index()
+        with col_i1:
+            eco_aware = (df_filtered['Aware_Plastic_Ban'] == 'Yes').mean() * 100
+            st.metric("Plastic Ban Awareness", f"{eco_aware:.0f}%")
+            st.caption("High awareness presents opportunity")
         
-        fig_geo = px.scatter(
-            emirate_stats,
-            x='Adoption_Rate',
-            y='Avg_Spend',
-            size='Sample_Size',
-            color='Emirate',
-            title="Market Opportunity Matrix: Adoption vs. Spending by Emirate",
-            labels={'Adoption_Rate': 'Adoption Rate (%)', 'Avg_Spend': 'Avg. Spending (AED)'},
-            hover_data=['Sample_Size']
+        with col_i2:
+            used_before = (df_filtered['Used_Refill_Before'] == 'Yes').mean() * 100
+            st.metric("Prior Refill Experience", f"{used_before:.0f}%")
+            st.caption("Educational campaigns needed")
+        
+        with col_i3:
+            eco_users = (df_filtered['Uses_Eco_Products'] == 'Yes').mean() * 100
+            st.metric("Eco-Product Users", f"{eco_users:.0f}%")
+            st.caption("Target segment identified")
+
+    # =========================================================================
+    # PAGE 2: MODEL PERFORMANCE & COMPARISON
+    # =========================================================================
+    elif "Model Performance" in page:
+        st.title("🤖 Advanced Model Performance & Benchmarking")
+        
+        st.markdown("""
+        <div class='success-box'>
+        <b>🎓 Methodology:</b> Comprehensive comparison of 4 classification algorithms and 2 regression models
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Classification Comparison
+        st.header("🎯 Classification Models: Adoption Prediction")
+        
+        # Metrics Table
+        st.subheader("📊 Performance Metrics Comparison")
+        metrics_df = pd.DataFrame(metrics['classification']).T
+        metrics_display = metrics_df[['Accuracy', 'Precision', 'Recall', 'F1 Score']].copy()
+        
+        # Highlight best values
+        st.dataframe(
+            metrics_display.style.highlight_max(axis=0, color='#d6f5d6').format('{:.4f}'),
+            use_container_width=True
         )
-        fig_geo.add_hline(y=avg_wtp, line_dash="dash", line_color="gray", 
-                         annotation_text="Avg. Spending")
-        fig_geo.add_vline(x=adoption_rate, line_dash="dash", line_color="gray",
-                         annotation_text="Avg. Adoption")
-        st.plotly_chart(fig_geo, use_container_width=True)
         
-        # Customer Journey
-        st.subheader("🛤️ Customer Journey Insights")
-        col_j1, col_j2, col_j3 = st.columns(3)
+        # Best Model Highlight
+        best_model = metrics_display['Accuracy'].idxmax()
+        st.success(f"🏆 **Best Performing Model:** {best_model} with {metrics_display.loc[best_model, 'Accuracy']:.2%} accuracy")
         
-        with col_j1:
-            aware_rate = (df_filtered['Aware_Plastic_Ban'] == 'Yes').mean() * 100
-            st.metric("Plastic Ban Awareness", f"{aware_rate:.1f}%")
+        # Confusion Matrices
+        st.subheader("🔍 Confusion Matrix Analysis")
+        
+        models_list = list(metrics['classification'].keys())
+        n_models = len(models_list)
+        cols = st.columns(min(n_models, 4))
+        
+        for i, model_name in enumerate(models_list):
+            with cols[i % len(cols)]:
+                st.markdown(f"**{model_name}**")
+                cm = metrics['classification'][model_name]['Confusion Matrix']
+                
+                # Create annotated heatmap
+                fig = ff.create_annotated_heatmap(
+                    z=cm,
+                    x=['Predicted No', 'Predicted Yes'],
+                    y=['Actual No', 'Actual Yes'],
+                    colorscale='Greens',
+                    showscale=True
+                )
+                fig.update_layout(
+                    height=300,
+                    margin=dict(l=0, r=0, t=30, b=0)
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Calculate additional metrics
+                tn, fp, fn, tp = cm.ravel()
+                specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+                st.caption(f"Specificity: {specificity:.2%}")
+        
+        # ROC Curves Comparison
+        st.subheader("📈 ROC Curve Comparison")
+        
+        fig_roc = go.Figure()
+        
+        for model_name in models_list:
+            if 'ROC_Curve' in metrics['classification'][model_name]:
+                fpr, tpr = metrics['classification'][model_name]['ROC_Curve']
+                auc_score = metrics['classification'][model_name]['ROC_AUC']
+                
+                fig_roc.add_trace(go.Scatter(
+                    x=fpr, y=tpr,
+                    mode='lines',
+                    name=f'{model_name} (AUC = {auc_score:.3f})',
+                    line=dict(width=3)
+                ))
+        
+        # Add diagonal reference line
+        fig_roc.add_trace(go.Scatter(
+            x=[0, 1], y=[0, 1],
+            mode='lines',
+            name='Random Classifier',
+            line=dict(color='gray', dash='dash', width=2)
+        ))
+        
+        fig_roc.update_layout(
+            title="ROC Curves: Model Comparison",
+            xaxis_title="False Positive Rate",
+            yaxis_title="True Positive Rate",
+            hovermode='x',
+            height=500
+        )
+        st.plotly_chart(fig_roc, use_container_width=True)
+        
+        # Performance Summary
+        st.subheader("🎯 Model Selection Recommendations")
+        
+        col_rec1, col_rec2 = st.columns(2)
+        
+        with col_rec1:
+            st.markdown("""
+            <div class='info-box'>
+            <h4>🚀 Production Deployment</h4>
+            <p><b>Recommended:</b> Random Forest or Gradient Boosting</p>
+            <ul>
+                <li>High accuracy with robust performance</li>
+                <li>Handles non-linear relationships well</li>
+                <li>Built-in feature importance</li>
+                <li>Less prone to overfitting than Decision Trees</li>
+            </ul>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with col_rec2:
+            st.markdown("""
+            <div class='warning-box'>
+            <h4>⚠️ Model Considerations</h4>
+            <p><b>Trade-offs:</b></p>
+            <ul>
+                <li><b>Decision Tree:</b> Fast but may overfit</li>
+                <li><b>Random Forest:</b> Slower but more accurate</li>
+                <li><b>Gradient Boosting:</b> Best performance but computationally expensive</li>
+                <li><b>Logistic Regression:</b> Interpretable but limited for non-linear data</li>
+            </ul>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Regression Comparison
+        st.header("💰 Regression Models: Spending Prediction")
+        
+        st.subheader("📊 Regression Performance Metrics")
+        
+        reg_metrics = pd.DataFrame(metrics['regression']).T
+        st.dataframe(
+            reg_metrics.style.highlight_max(subset=['R2'], color='#d6f5d6')
+                           .highlight_min(subset=['RMSE', 'MAE'], color='#d6f5d6')
+                           .format({'R2': '{:.4f}', 'RMSE': '{:.2f}', 'MAE': '{:.2f}'}),
+            use_container_width=True
+        )
+        
+        # Best Regression Model
+        best_reg_model = reg_metrics['R2'].idxmax()
+        st.success(f"🏆 **Best Regression Model:** {best_reg_model} with R² = {reg_metrics.loc[best_reg_model, 'R2']:.4f}")
+        
+        # Regression Visualization
+        col_reg1, col_reg2 = st.columns(2)
+        
+        with col_reg1:
+            st.subheader("Model Performance Comparison")
+            fig_reg_comp = go.Figure(data=[
+                go.Bar(name='R² Score', x=reg_metrics.index, y=reg_metrics['R2'], marker_color='#2E8B57'),
+            ])
+            fig_reg_comp.update_layout(
+                title="R² Score Comparison",
+                yaxis_title="R² Score",
+                yaxis_range=[0, 1],
+                height=400
+            )
+            st.plotly_chart(fig_reg_comp, use_container_width=True)
+        
+        with col_reg2:
+            st.subheader("Prediction Error Comparison")
+            fig_error = go.Figure(data=[
+                go.Bar(name='RMSE', x=reg_metrics.index, y=reg_metrics['RMSE'], marker_color='#FF6347'),
+                go.Bar(name='MAE', x=reg_metrics.index, y=reg_metrics['MAE'], marker_color='#FFA500')
+            ])
+            fig_error.update_layout(
+                title="Error Metrics Comparison",
+                yaxis_title="Error (AED)",
+                barmode='group',
+                height=400
+            )
+            st.plotly_chart(fig_error, use_container_width=True)
+        
+        # Feature Importance (if available)
+        if 'feature_importance_clf' in models:
+            st.markdown("---")
+            st.header("🔍 Feature Importance Analysis")
             
-        with col_j2:
-            used_before_rate = (df_filtered['Used_Refill_Before'] == 'Yes').mean() * 100
-            st.metric("Prior Refill Experience", f"{used_before_rate:.1f}%")
-        
-        with col_j3:
-            eco_product_rate = (df_filtered['Uses_Eco_Products'] == 'Yes').mean() * 100
-            st.metric("Current Eco-Product Users", f"{eco_product_rate:.1f}%")
+            feature_imp = models['feature_importance_clf']
+            
+            fig_fi = px.bar(
+                feature_imp.head(15),
+                x='Importance',
+                y='Feature',
+                orientation='h',
+                title="Top 15 Most Important Features for Adoption Prediction",
+                color='Importance',
+                color_continuous_scale='Greens'
+            )
+            fig_fi.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
+            st.plotly_chart(fig_fi, use_container_width=True)
+            
+            st.info("💡 **Insight:** Focus marketing and product development on the top-ranking features to maximize adoption.")
 
     # =========================================================================
-    # PAGE 2: DATA EXPLORER & QUALITY
+    # PAGE 3: PREDICTIVE SIMULATOR
     # =========================================================================
-    elif "Data Explorer" in page:
-        st.title("📊 Data Explorer & Quality Dashboard")
-        
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 Data Preview", "📈 Distributions", "🔗 Correlations", "✅ Data Quality"])
-        
-        with tab1:
-            st.subheader("Raw Data Preview")
-            st.dataframe(df_filtered.head(100), use_container_width=True)
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Records", len(df_filtered))
-            with col2:
-                st.metric("Total Features", len(df_filtered.columns))
-            with col3:
-                st.metric("Memory Usage", f"{df_filtered.memory_usage(deep=True).sum() / 1024:.2f} KB")
-            
-            st.subheader("Statistical Summary")
-            st.dataframe(df_filtered.describe(), use_container_width=True)
-        
-        with tab2:
-            st.subheader("Feature Distributions")
-            
-            col_dist1, col_dist2 = st.columns(2)
-            
-            with col_dist1:
-                selected_cat = st.selectbox("Select Categorical Feature", df_filtered.select_dtypes(include='object').columns)
-                fig_cat = px.histogram(
-                    df_filtered,
-                    x=selected_cat,
-                    color='Likely_to_Use_ReFillHub',
-                    barmode='group',
-                    title=f"Distribution of {selected_cat}",
-                    color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'}
-                )
-                st.plotly_chart(fig_cat, use_container_width=True)
-            
-            with col_dist2:
-                selected_num = st.selectbox("Select Numerical Feature", df_filtered.select_dtypes(include=['int64', 'float64']).columns)
-                fig_num = px.histogram(
-                    df_filtered,
-                    x=selected_num,
-                    marginal='box',
-                    title=f"Distribution of {selected_num}",
-                    color_discrete_sequence=['#2E8B57']
-                )
-                st.plotly_chart(fig_num, use_container_width=True)
-        
-        with tab3:
-            st.subheader("Correlation Analysis")
-            
-            # Numerical correlations
-            numeric_cols = df_filtered.select_dtypes(include=['int64', 'float64']).columns
-            corr_matrix = df_filtered[numeric_cols].corr()
-            
-            fig_corr = px.imshow(
-                corr_matrix,
-                title="Feature Correlation Heatmap",
-                color_continuous_scale='RdYlGn',
-                aspect='auto',
-                labels=dict(color="Correlation")
-            )
-            st.plotly_chart(fig_corr, use_container_width=True)
-            
-            # Top correlations
-            st.subheader("Strongest Correlations")
-            corr_pairs = corr_matrix.unstack().sort_values(ascending=False)
-            corr_pairs = corr_pairs[corr_pairs < 1]
-            top_corr = corr_pairs.head(10)
-            
-            st.dataframe(
-                pd.DataFrame(top_corr).reset_index().rename(columns={0: 'Correlation', 'level_0': 'Feature 1', 'level_1': 'Feature 2'}),
-                use_container_width=True
-            )
-        
-        with tab4:
-            st.subheader("Data Quality Report")
-            
-            # Missing values
-            col_q1, col_q2 = st.columns(2)
-            
-            with col_q1:
-                st.markdown("#### Missing Values")
-                missing = df_filtered.isnull().sum()
-                missing_pct = (missing / len(df_filtered) * 100).round(2)
-                missing_df = pd.DataFrame({
-                    'Feature': missing.index,
-                    'Missing Count': missing.values,
-                    'Missing %': missing_pct.values
-                }).sort_values('Missing Count', ascending=False)
-                
-                st.dataframe(missing_df[missing_df['Missing Count'] > 0], use_container_width=True)
-                
-                if missing_df['Missing Count'].sum() == 0:
-                    st.success("✅ No missing values detected!")
-            
-            with col_q2:
-                st.markdown("#### Duplicate Records")
-                duplicates = df_filtered.duplicated().sum()
-                st.metric("Duplicate Rows", duplicates)
-                
-                if duplicates == 0:
-                    st.success("✅ No duplicate records found!")
-                else:
-                    st.warning(f"⚠️ Found {duplicates} duplicate records")
-            
-            # Data types
-            st.markdown("#### Data Type Summary")
-            dtype_df = pd.DataFrame({
-                'Feature': df_filtered.dtypes.index,
-                'Data Type': df_filtered.dtypes.values,
-                'Unique Values': [df_filtered[col].nunique() for col in df_filtered.columns]
-            })
-            st.dataframe(dtype_df, use_container_width=True)
-            
-            # Outlier detection for numerical columns
-            st.markdown("#### Outlier Detection (IQR Method)")
-            outlier_summary = []
-            for col in numeric_cols:
-                Q1 = df_filtered[col].quantile(0.25)
-                Q3 = df_filtered[col].quantile(0.75)
-                IQR = Q3 - Q1
-                outliers = ((df_filtered[col] < (Q1 - 1.5 * IQR)) | (df_filtered[col] > (Q3 + 1.5 * IQR))).sum()
-                outlier_summary.append({'Feature': col, 'Outliers': outliers, 'Outlier %': f"{outliers/len(df_filtered)*100:.2f}%"})
-            
-            outlier_df = pd.DataFrame(outlier_summary).sort_values('Outliers', ascending=False)
-            st.dataframe(outlier_df, use_container_width=True)
-
-    # =========================================================================
-    # PAGE 3: CUSTOMER SEGMENTATION
-    # =========================================================================
-    elif "Customer Segmentation" in page:
-        st.title("🧩 Customer Segmentation Analysis")
+    elif "Predictive Simulator" in page:
+        st.title("🔮 AI-Powered Predictive Simulator")
         
         st.markdown("""
         <div class='info-box'>
-        <b>Methodology:</b> K-Means Clustering (k=4) based on psychographic and behavioral features
+        <b>🎯 Objective:</b> Simulate customer profiles and predict adoption likelihood + spending potential
+        </div>
+        """, unsafe_allow_html=True)
+        
+        tab1, tab2 = st.tabs(["🎯 Single Customer Prediction", "📊 Scenario Comparison"])
+        
+        with tab1:
+            st.subheader("Configure Customer Profile")
+            
+            with st.form("prediction_form"):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown("**👤 Demographics**")
+                    age = st.selectbox("Age Group", df['Age_Group'].unique())
+                    gender = st.selectbox("Gender", df['Gender'].unique())
+                    income = st.selectbox("Income Level (AED)", df['Income'].unique())
+                    emirate = st.selectbox("Emirate", df['Emirate'].unique())
+                    family_size = st.selectbox("Family Size", df['Family_Size'].unique())
+                
+                with col2:
+                    st.markdown("**💭 Attitudes (1-5 Scale)**")
+                    imp_price = st.slider("Price Importance", 1, 5, 3)
+                    imp_sust = st.slider("Sustainability Importance", 1, 5, 3)
+                    imp_conv = st.slider("Convenience Importance", 1, 5, 3)
+                    waste_score = st.slider("Waste Reduction Effort", 1, 5, 3)
+                    social_score = st.slider("Social Influence", 1, 5, 3)
+                
+                with col3:
+                    st.markdown("**🛒 Behaviors**")
+                    eco_brand = st.select_slider("Eco-Brand Preference", [1, 2, 3, 4, 5], 3)
+                    follow_camp = st.selectbox("Follows Green Campaigns?", ["Yes", "No"])
+                    used_before = st.selectbox("Used Refill Before?", ["Yes", "No"])
+                    freq = st.selectbox("Purchase Frequency", df['Purchase_Frequency'].unique())
+                    try_likelihood = st.slider("Initial Interest Level", 1, 5, 3)
+                
+                col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
+                with col_btn2:
+                    submitted = st.form_submit_button("🚀 Run Prediction", use_container_width=True)
+            
+            if submitted:
+                # Prepare input (fill missing features with mode)
+                input_row = pd.DataFrame({col: [df[col].mode()[0]] for col in cat_features + num_features})
+                
+                # Update with user inputs
+                input_row.update({
+                    'Age_Group': [age],
+                    'Gender': [gender],
+                    'Income': [income],
+                    'Emirate': [emirate],
+                    'Family_Size': [family_size],
+                    'Importance_Price': [imp_price],
+                    'Importance_Sustainability': [imp_sust],
+                    'Importance_Convenience': [imp_conv],
+                    'Reduce_Waste_Score': [waste_score],
+                    'Social_Influence_Score': [social_score],
+                    'Eco_Brand_Preference': [eco_brand],
+                    'Follow_Campaigns': [follow_camp],
+                    'Used_Refill_Before': [used_before],
+                    'Purchase_Frequency': [freq],
+                    'Try_Refill_Likelihood': [try_likelihood]
+                })
+                
+                # Family size numeric
+                if '5+' in family_size: input_row['Family_Size_Num'] = [5.0]
+                elif '1-2' in family_size: input_row['Family_Size_Num'] = [1.5]
+                elif '3-4' in family_size: input_row['Family_Size_Num'] = [3.5]
+                
+                # Predict with best model
+                best_classifier = max(metrics['classification'], key=lambda x: metrics['classification'][x]['Accuracy'])
+                best_regressor = max(metrics['regression'], key=lambda x: metrics['regression'][x]['R2'])
+                
+                clf_model = models[best_classifier]
+                reg_model = models[f"{best_regressor}_Regressor"]
+                
+                adoption_prob = clf_model.predict_proba(input_row)[0][1]
+                predicted_spend = reg_model.predict(input_row)[0]
+                
+                # Display Results
+                st.markdown("---")
+                st.header("🎯 Prediction Results")
+                
+                col_r1, col_r2 = st.columns(2)
+                
+                with col_r1:
+                    st.subheader("📊 Adoption Likelihood")
+                    
+                    # Gauge Chart
+                    fig_gauge = go.Figure(go.Indicator(
+                        mode="gauge+number+delta",
+                        value=adoption_prob * 100,
+                        domain={'x': [0, 1], 'y': [0, 1]},
+                        title={'text': "Adoption Probability (%)", 'font': {'size': 20}},
+                        delta={'reference': 50, 'increasing': {'color': "#2E8B57"}},
+                        gauge={
+                            'axis': {'range': [0, 100], 'tickwidth': 2},
+                            'bar': {'color': "#2E8B57" if adoption_prob > 0.5 else "#FF6347"},
+                            'steps': [
+                                {'range': [0, 30], 'color': 'rgba(255, 99, 71, 0.3)'},
+                                {'range': [30, 70], 'color': 'rgba(255, 206, 86, 0.3)'},
+                                {'range': [70, 100], 'color': 'rgba(46, 139, 87, 0.3)'}
+                            ],
+                            'threshold': {
+                                'line': {'color': "black", 'width': 3},
+                                'thickness': 0.75,
+                                'value': 50
+                            }
+                        }
+                    ))
+                    fig_gauge.update_layout(height=350)
+                    st.plotly_chart(fig_gauge, use_container_width=True)
+                    
+                    # Interpretation
+                    if adoption_prob > 0.7:
+                        st.success("✅ **High Probability** - Strong candidate for conversion!")
+                    elif adoption_prob > 0.4:
+                        st.info("ℹ️ **Moderate Probability** - Needs nurturing and value demonstration")
+                    else:
+                        st.warning("⚠️ **Low Probability** - Requires significant incentives")
+                    
+                    st.metric("Model Used", best_classifier, 
+                             help=f"Accuracy: {metrics['classification'][best_classifier]['Accuracy']:.2%}")
+                
+                with col_r2:
+                    st.subheader("💰 Spending Potential")
+                    
+                    avg_wtp = df['Willingness_to_Pay_AED'].mean()
+                    percentile = (df['Willingness_to_Pay_AED'] < predicted_spend).mean() * 100
+                    
+                    st.metric(
+                        "Predicted Spending per Visit",
+                        f"AED {predicted_spend:.2f}",
+                        delta=f"{predicted_spend - avg_wtp:+.2f} vs. average",
+                        delta_color="normal" if predicted_spend > avg_wtp else "inverse"
+                    )
+                    
+                    st.metric("Spending Percentile", f"{percentile:.0f}th")
+                    
+                    # Comparison Chart
+                    fig_compare = go.Figure()
+                    fig_compare.add_trace(go.Bar(
+                        x=['Market Average', 'This Customer'],
+                        y=[avg_wtp, predicted_spend],
+                        marker_color=['#808080', '#2E8B57'],
+                        text=[f'AED {avg_wtp:.2f}', f'AED {predicted_spend:.2f}'],
+                        textposition='auto'
+                    ))
+                    fig_compare.update_layout(
+                        title="Spending Comparison",
+                        yaxis_title="Willingness to Pay (AED)",
+                        showlegend=False,
+                        height=300
+                    )
+                    st.plotly_chart(fig_compare, use_container_width=True)
+                    
+                    st.metric("Model Used", best_regressor,
+                             help=f"R²: {metrics['regression'][best_regressor]['R2']:.4f}")
+                
+                # Customer Lifetime Value
+                st.markdown("---")
+                st.subheader("💎 Customer Lifetime Value (CLV) Analysis")
+                
+                col_clv1, col_clv2, col_clv3, col_clv4 = st.columns(4)
+                
+                with col_clv1:
+                    visits_year = st.number_input("Expected Visits/Year", 4, 52, 24, 
+                                                 help="Weekly ≈ 52, Bi-weekly ≈ 24")
+                with col_clv2:
+                    retention = st.slider("Retention Rate", 0.5, 0.95, 0.75, 0.05)
+                with col_clv3:
+                    years = st.number_input("Time Horizon (Years)", 1, 10, 3)
+                with col_clv4:
+                    margin = st.slider("Gross Margin %", 20, 60, 40)
+                
+                clv = calculate_clv(predicted_spend, visits_year, retention, years)
+                clv_profit = clv * (margin / 100)
+                
+                col_clv_r1, col_clv_r2, col_clv_r3 = st.columns(3)
+                
+                with col_clv_r1:
+                    st.metric("Total CLV (Revenue)", f"AED {clv:,.2f}")
+                with col_clv_r2:
+                    st.metric("Gross Profit", f"AED {clv_profit:,.2f}")
+                with col_clv_r3:
+                    cac = 50  # Assumed Customer Acquisition Cost
+                    roi = ((clv_profit - cac) / cac) * 100
+                    st.metric("ROI", f"{roi:.0f}%", help=f"Assuming CAC = AED {cac}")
+        
+        with tab2:
+            st.subheader("📊 Scenario Comparison Tool")
+            st.markdown("Compare multiple customer profiles side-by-side")
+            
+            st.info("🚧 **Coming Soon:** Batch scenario comparison with downloadable reports")
+
+    # =========================================================================
+    # PAGE 4: CUSTOMER SEGMENTATION
+    # =========================================================================
+    elif "Customer Segmentation" in page:
+        st.title("🧩 Advanced Customer Segmentation")
+        
+        st.markdown("""
+        <div class='info-box'>
+        <b>🎯 Methodology:</b> K-Means Clustering with optimal k=4 based on elbow method and silhouette analysis
         </div>
         """, unsafe_allow_html=True)
         
         col_m1, col_m2, col_m3 = st.columns(3)
+        
         with col_m1:
-            st.metric("Silhouette Score", f"{metrics['silhouette_score']:.3f}", help="Cluster quality (0.3-0.5 is good)")
+            st.metric("Silhouette Score", f"{metrics['silhouette_score']:.3f}",
+                     help="Quality of clustering (0.3-0.5 is good for behavioral data)")
         with col_m2:
             st.metric("Number of Clusters", "4")
         with col_m3:
-            total_variance = sum([cluster_features.index(f) for f in cluster_features if f in df_filtered.columns])
             st.metric("Features Used", len(cluster_features))
         
         # Elbow & Silhouette Analysis
         st.subheader("🔍 Cluster Optimization Analysis")
+        
         col_opt1, col_opt2 = st.columns(2)
         
         K_range, inertias, silhouette_scores = metrics['elbow_data']
@@ -928,9 +1202,9 @@ def main():
                 marker=dict(size=10)
             ))
             fig_elbow.update_layout(
-                title="Elbow Method",
+                title="Elbow Method for Optimal K",
                 xaxis_title="Number of Clusters (k)",
-                yaxis_title="Inertia",
+                yaxis_title="Within-Cluster Sum of Squares (Inertia)",
                 hovermode='x'
             )
             st.plotly_chart(fig_elbow, use_container_width=True)
@@ -945,7 +1219,7 @@ def main():
                 marker=dict(size=10)
             ))
             fig_sil.update_layout(
-                title="Silhouette Analysis",
+                title="Silhouette Score Analysis",
                 xaxis_title="Number of Clusters (k)",
                 yaxis_title="Silhouette Score",
                 hovermode='x'
@@ -954,24 +1228,26 @@ def main():
         
         # 3D Visualization
         st.subheader("🎨 Interactive 3D Cluster Visualization")
+        
         df_filtered['Cluster_Label'] = df_filtered['Cluster'].astype(str)
         
         fig_3d = px.scatter_3d(
             df_filtered,
             x='Importance_Price',
             y='Importance_Sustainability',
-            z='Importance_Convenience',
+            z='Reduce_Waste_Score',
             color='Cluster_Label',
             symbol='Likely_to_Use_ReFillHub',
             opacity=0.7,
-            title="Customer Segments in 3D Feature Space",
-            color_discrete_sequence=px.colors.qualitative.Set2
+            title="Customer Segments in 3D Psychographic Space",
+            color_discrete_sequence=px.colors.qualitative.Set2,
+            hover_data=['Emirate', 'Income', 'Willingness_to_Pay_AED']
         )
         fig_3d.update_layout(
             scene=dict(
                 xaxis_title="Price Importance",
                 yaxis_title="Sustainability Importance",
-                zaxis_title="Convenience Importance"
+                zaxis_title="Waste Reduction Score"
             ),
             height=600
         )
@@ -983,120 +1259,123 @@ def main():
         cluster_profiles = models['cluster_profiles']
         cluster_sizes = models['cluster_sizes']
         
-        # Add cluster sizes to profiles
-        cluster_profiles['Cluster_Size'] = cluster_sizes
-        cluster_profiles['Size_Percent'] = (cluster_sizes / len(df_filtered) * 100).round(1)
+        # Enhanced profile table
+        profile_display = cluster_profiles.copy()
+        profile_display['Cluster_Size'] = cluster_sizes
+        profile_display['Size_Percent'] = (cluster_sizes / len(df_filtered) * 100).round(1)
+        profile_display['Adoption_Rate'] = (profile_display['Likely_to_Use_ReFillHub'] * 100).round(1)
         
         st.dataframe(
-            cluster_profiles.style.background_gradient(cmap='Greens', subset=cluster_features).format(precision=2),
+            profile_display.style.background_gradient(cmap='Greens', subset=cluster_features)
+                                .format(precision=2),
             use_container_width=True
         )
         
-        # Cluster Comparison
-        st.subheader("⚖️ Cluster Comparison")
+        # Radar Chart Comparison
+        st.subheader("⚖️ Cluster Comparison: Radar Chart")
         
-        col_comp1, col_comp2 = st.columns(2)
+        categories = cluster_features
         
-        with col_comp1:
-            # Radar chart for cluster comparison
-            categories = cluster_features
-            
-            fig_radar = go.Figure()
-            
-            for cluster_id in sorted(df_filtered['Cluster'].unique()):
-                values = cluster_profiles.loc[cluster_id, cluster_features].values.tolist()
-                values += values[:1]  # Close the polygon
-                
-                fig_radar.add_trace(go.Scatterpolar(
-                    r=values,
-                    theta=categories + [categories[0]],
-                    fill='toself',
-                    name=f'Cluster {cluster_id}'
-                ))
-            
-            fig_radar.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 5])),
-                showlegend=True,
-                title="Cluster Profiles: Radar Chart"
-            )
-            st.plotly_chart(fig_radar, use_container_width=True)
+        fig_radar = go.Figure()
         
-        with col_comp2:
-            # Cluster size & adoption
-            cluster_stats = df_filtered.groupby('Cluster').agg({
-                'Likely_to_Use_ReFillHub': lambda x: (x == 'Yes').mean() * 100,
-                'Willingness_to_Pay_AED': 'mean',
-                'Cluster': 'count'
-            }).rename(columns={
-                'Likely_to_Use_ReFillHub': 'Adoption_Rate',
-                'Willingness_to_Pay_AED': 'Avg_Spend',
-                'Cluster': 'Size'
-            }).reset_index()
+        for cluster_id in sorted(df_filtered['Cluster'].unique()):
+            values = cluster_profiles.loc[cluster_id, cluster_features].values.tolist()
+            values += values[:1]  # Close polygon
             
-            fig_bubble = px.scatter(
-                cluster_stats,
-                x='Adoption_Rate',
-                y='Avg_Spend',
-                size='Size',
-                color='Cluster',
-                title="Cluster Value Matrix",
-                labels={'Adoption_Rate': 'Adoption Rate (%)', 'Avg_Spend': 'Avg. Spending (AED)'},
-                color_discrete_sequence=px.colors.qualitative.Set2
-            )
-            st.plotly_chart(fig_bubble, use_container_width=True)
+            fig_radar.add_trace(go.Scatterpolar(
+                r=values,
+                theta=categories + [categories[0]],
+                fill='toself',
+                name=f'Cluster {cluster_id}'
+            ))
+        
+        fig_radar.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=[0, 5])),
+            showlegend=True,
+            title="Cluster Profiles: Multi-Dimensional Comparison",
+            height=500
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+        
+        # Cluster Value Matrix
+        st.subheader("💎 Cluster Value Matrix")
+        
+        cluster_stats = df_filtered.groupby('Cluster').agg({
+            'Likely_to_Use_ReFillHub': lambda x: (x == 'Yes').mean() * 100,
+            'Willingness_to_Pay_AED': 'mean',
+            'Cluster': 'count'
+        }).rename(columns={
+            'Likely_to_Use_ReFillHub': 'Adoption_Rate',
+            'Willingness_to_Pay_AED': 'Avg_Spend',
+            'Cluster': 'Size'
+        }).reset_index()
+        
+        fig_bubble = px.scatter(
+            cluster_stats,
+            x='Adoption_Rate',
+            y='Avg_Spend',
+            size='Size',
+            color='Cluster',
+            title="Cluster Opportunity Matrix: Adoption vs. Spending",
+            labels={'Adoption_Rate': 'Adoption Rate (%)', 'Avg_Spend': 'Avg. Spending (AED)'},
+            color_discrete_sequence=px.colors.qualitative.Set2,
+            hover_data=['Size']
+        )
+        fig_bubble.update_layout(height=500)
+        st.plotly_chart(fig_bubble, use_container_width=True)
         
         # Persona Descriptions
-        st.subheader("👥 Customer Personas & Strategies")
+        st.subheader("👥 Customer Personas & Strategic Recommendations")
         
         personas = {
             0: {
                 'name': '🌱 The Eco-Warriors',
                 'description': 'High sustainability focus, willing to pay premium for environmental impact',
                 'strategy': [
-                    '• Lead with impact metrics (e.g., "Saved 100 plastic bottles")',
-                    '• Premium eco-brand partnerships',
-                    '• Sustainability certificates and badges',
-                    '• Community events and eco-campaigns'
+                    '• Lead with impact metrics (e.g., "You saved 100 plastic bottles")',
+                    '• Premium eco-brand partnerships and certifications',
+                    '• Sustainability badges and gamification',
+                    '• Community events and environmental campaigns'
                 ],
                 'color': 'success'
             },
             1: {
-                'name': '💰 The Budget-Conscious',
-                'description': 'Price-sensitive shoppers looking for value and savings',
+                'name': '💰 The Value Seekers',
+                'description': 'Price-sensitive shoppers looking for savings and best deals',
                 'strategy': [
-                    '• Emphasize cost savings vs. packaged products',
-                    '• Subscription discounts and loyalty programs',
-                    '• Bulk refill discounts',
-                    '• Price comparison campaigns'
+                    '• Emphasize cost savings: "Save 20% vs. packaged products"',
+                    '• Subscription plans with volume discounts',
+                    '• Loyalty programs with cashback rewards',
+                    '• Price comparison tools in app'
                 ],
                 'color': 'info'
             },
             2: {
                 'name': '⚡ The Convenience Seekers',
-                'description': 'Busy professionals who value speed and accessibility',
+                'description': 'Busy professionals who prioritize speed and accessibility',
                 'strategy': [
-                    '• Strategic locations (offices, malls, residential)',
-                    '• Mobile app with pre-ordering',
-                    '• Express lanes and tap-to-pay',
-                    '• Home delivery options'
+                    '• Strategic locations: offices, malls, residential complexes',
+                    '• Mobile app with pre-ordering and QR code payments',
+                    '• Express checkout lanes',
+                    '• Delivery/subscription services'
                 ],
                 'color': 'warning'
             },
             3: {
-                'name': '😐 The Apathetic',
-                'description': 'Low engagement across all dimensions, hardest to convert',
+                'name': '😐 The Skeptics',
+                'description': 'Low engagement, need strong incentives to try',
                 'strategy': [
                     '• Aggressive first-time discounts (50% off)',
-                    '• Influencer partnerships and social proof',
-                    '• Gamification and rewards',
-                    '• Simplified messaging and trial offers'
+                    '• Influencer partnerships and testimonials',
+                    '• Free trial programs',
+                    '• Simplified onboarding with immediate rewards'
                 ],
                 'color': 'error'
             }
         }
         
         for cluster_id, persona in personas.items():
-            with st.expander(f"**Cluster {cluster_id}: {persona['name']}** (Size: {cluster_sizes[cluster_id]} | {cluster_profiles.loc[cluster_id, 'Size_Percent']:.1f}%)"):
+            with st.expander(f"**Cluster {cluster_id}: {persona['name']}** (Size: {cluster_sizes[cluster_id]} | {profile_display.loc[cluster_id, 'Size_Percent']:.1f}%)"):
                 st.markdown(f"**Profile:** {persona['description']}")
                 st.markdown("**Recommended Strategies:**")
                 for strategy in persona['strategy']:
@@ -1104,7 +1383,7 @@ def main():
                 
                 # Cluster-specific metrics
                 cluster_data = df_filtered[df_filtered['Cluster'] == cluster_id]
-                col_p1, col_p2, col_p3 = st.columns(3)
+                col_p1, col_p2, col_p3, col_p4 = st.columns(4)
                 
                 with col_p1:
                     adoption = (cluster_data['Likely_to_Use_ReFillHub'] == 'Yes').mean() * 100
@@ -1116,270 +1395,32 @@ def main():
                 
                 with col_p3:
                     sustainability = cluster_data['Importance_Sustainability'].mean()
-                    st.metric("Sustainability Score", f"{sustainability:.2f}/5")
-
-    # =========================================================================
-    # PAGE 4: PREDICTIVE SIMULATOR
-    # =========================================================================
-    elif "Predictive Simulator" in page:
-        st.title("🔮 AI-Powered Predictive Simulator")
-        
-        st.markdown("""
-        <div class='info-box'>
-        <b>Simulate customer profiles</b> and predict their adoption likelihood and spending potential using trained ML models.
-        </div>
-        """, unsafe_allow_html=True)
-        
-        tab1, tab2 = st.tabs(["🎯 Single Prediction", "📊 Batch Predictions"])
-        
-        with tab1:
-            with st.form("simulation_form"):
-                st.header("Customer Profile Configuration")
+                    st.metric("Sustainability", f"{sustainability:.2f}/5")
                 
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.subheader("📋 Demographics")
-                    age = st.selectbox("Age Group", df['Age_Group'].unique())
-                    gender = st.selectbox("Gender", df['Gender'].unique())
-                    income = st.selectbox("Income (AED)", df['Income'].unique())
-                    fam_size = st.selectbox("Family Size", df['Family_Size'].unique(), index=1)
-                    emirate = st.selectbox("Emirate", df['Emirate'].unique())
-                    occupation = st.selectbox("Occupation", df['Occupation'].unique())
-                
-                with col2:
-                    st.subheader("💭 Attitudes (1-5)")
-                    imp_price = st.slider("Importance: Price", 1, 5, 3)
-                    imp_sust = st.slider("Importance: Sustainability", 1, 5, 3)
-                    imp_conv = st.slider("Importance: Convenience", 1, 5, 3)
-                    waste_score = st.slider("Waste Reduction Effort", 1, 5, 3)
-                    social_score = st.slider("Social Influence", 1, 5, 3)
-                    try_likelihood = st.slider("Initial Interest", 1, 5, 3)
-                
-                with col3:
-                    st.subheader("🛒 Behaviors")
-                    eco_brand = st.select_slider("Eco-Brand Preference", [1, 2, 3, 4, 5], 3)
-                    follow_camp = st.selectbox("Follows Green Campaigns", ["Yes", "No"])
-                    used_before = st.selectbox("Used Refill Service Before", ["Yes", "No"])
-                    purchase_freq = st.selectbox("Shopping Frequency", df['Purchase_Frequency'].unique())
-                    preferred_location = st.selectbox("Preferred Kiosk Location", df['Refill_Location'].unique())
-                
-                submitted = st.form_submit_button("🚀 Run Prediction", use_container_width=True)
-            
-            if submitted:
-                # Prepare input
-                if '5+' in fam_size: fam_num = 5
-                elif '1-2' in fam_size: fam_num = 1.5
-                else: fam_num = 3.5
-                
-                input_data = pd.DataFrame({
-                    'Age_Group': [age], 'Gender': [gender], 'Emirate': [emirate],
-                    'Occupation': [occupation], 'Income': [income],
-                    'Purchase_Location': [df['Purchase_Location'].mode()[0]],
-                    'Purchase_Frequency': [purchase_freq], 'Uses_Eco_Products': [df['Uses_Eco_Products'].mode()[0]],
-                    'Preferred_Packaging': [df['Preferred_Packaging'].mode()[0]],
-                    'Aware_Plastic_Ban': [df['Aware_Plastic_Ban'].mode()[0]],
-                    'Eco_Brand_Preference': [eco_brand], 'Follow_Campaigns': [follow_camp],
-                    'Used_Refill_Before': [used_before], 'Preferred_Payment_Mode': [df['Preferred_Payment_Mode'].mode()[0]],
-                    'Refill_Location': [preferred_location],
-                    'Container_Type': [df['Container_Type'].mode()[0]],
-                    'Interest_Non_Liquids': [df['Interest_Non_Liquids'].mode()[0]],
-                    'Discount_Switch': [df['Discount_Switch'].mode()[0]],
-                    'Family_Size_Num': [fam_num], 'Importance_Convenience': [imp_conv],
-                    'Importance_Price': [imp_price], 'Importance_Sustainability': [imp_sust],
-                    'Reduce_Waste_Score': [waste_score], 'Social_Influence_Score': [social_score],
-                    'Try_Refill_Likelihood': [try_likelihood]
-                })
-                
-                # Predictions
-                clf_pipeline = models['classification']
-                reg_pipeline = models['regression']
-                
-                pred_prob = clf_pipeline.predict_proba(input_data)[0]
-                pred_spend = reg_pipeline.predict(input_data)[0]
-                adoption_probability = pred_prob[1]
-                
-                # Display Results
-                st.markdown("---")
-                st.header("🎯 Prediction Results")
-                
-                col_r1, col_r2 = st.columns(2)
-                
-                with col_r1:
-                    st.subheader("Adoption Likelihood")
-                    
-                    # Gauge chart
-                    fig_gauge = go.Figure(go.Indicator(
-                        mode="gauge+number+delta",
-                        value=adoption_probability * 100,
-                        domain={'x': [0, 1], 'y': [0, 1]},
-                        title={'text': "Adoption Probability (%)", 'font': {'size': 20}},
-                        delta={'reference': 50, 'increasing': {'color': "#2E8B57"}},
-                        gauge={
-                            'axis': {'range': [0, 100], 'tickwidth': 1},
-                            'bar': {'color': "#2E8B57" if adoption_probability > 0.5 else "#FF6347"},
-                            'steps': [
-                                {'range': [0, 30], 'color': 'rgba(255, 99, 71, 0.3)'},
-                                {'range': [30, 70], 'color': 'rgba(255, 206, 86, 0.3)'},
-                                {'range': [70, 100], 'color': 'rgba(46, 139, 87, 0.3)'}
-                            ],
-                            'threshold': {
-                                'line': {'color': "red", 'width': 4},
-                                'thickness': 0.75,
-                                'value': 50
-                            }
-                        }
-                    ))
-                    st.plotly_chart(fig_gauge, use_container_width=True)
-                    
-                    if adoption_probability > 0.7:
-                        st.success("✅ **High Conversion Probability** - Strong candidate!")
-                    elif adoption_probability > 0.4:
-                        st.info("ℹ️ **Moderate Conversion Probability** - Needs nurturing")
-                    else:
-                        st.warning("⚠️ **Low Conversion Probability** - Focus on value proposition")
-                
-                with col_r2:
-                    st.subheader("Spending Potential")
-                    
-                    avg_wtp = df['Willingness_to_Pay_AED'].mean()
-                    percentile = (df['Willingness_to_Pay_AED'] < pred_spend).mean() * 100
-                    
-                    st.metric(
-                        "Predicted Spending",
-                        f"AED {pred_spend:.2f}",
-                        delta=f"{pred_spend - avg_wtp:+.2f} vs. average",
-                        help="Expected spending per visit"
-                    )
-                    
-                    st.metric(
-                        "Spending Percentile",
-                        f"{percentile:.0f}th",
-                        help="Ranking among all customers"
-                    )
-                    
-                    # Spending comparison
-                    fig_compare = go.Figure()
-                    fig_compare.add_trace(go.Bar(
-                        x=['Average Customer', 'This Profile'],
-                        y=[avg_wtp, pred_spend],
-                        marker_color=['#808080', '#2E8B57'],
-                        text=[f'AED {avg_wtp:.2f}', f'AED {pred_spend:.2f}'],
-                        textposition='auto'
-                    ))
-                    fig_compare.update_layout(
-                        title="Spending Comparison",
-                        yaxis_title="Willingness to Pay (AED)",
-                        showlegend=False
-                    )
-                    st.plotly_chart(fig_compare, use_container_width=True)
-                
-                # Customer Lifetime Value
-                st.subheader("💰 Customer Lifetime Value (CLV) Estimate")
-                
-                col_clv1, col_clv2, col_clv3, col_clv4 = st.columns(4)
-                
-                with col_clv1:
-                    visits_per_year = st.number_input("Est. Visits/Year", 4, 52, 24, help="Weekly = ~52, Bi-weekly = ~24")
-                with col_clv2:
-                    retention_rate = st.slider("Retention Rate", 0.5, 0.95, 0.75, 0.05)
-                with col_clv3:
-                    years = st.number_input("Time Horizon (Years)", 1, 10, 3)
-                with col_clv4:
-                    margin = st.slider("Gross Margin %", 20, 60, 40)
-                
-                clv = calculate_clv(pred_spend, visits_per_year, retention_rate, years)
-                clv_with_margin = clv * (margin / 100)
-                
-                col_clv_r1, col_clv_r2, col_clv_r3 = st.columns(3)
-                with col_clv_r1:
-                    st.metric("Total CLV (Revenue)", f"AED {clv:,.2f}")
-                with col_clv_r2:
-                    st.metric("Gross Profit", f"AED {clv_with_margin:,.2f}")
-                with col_clv_r3:
-                    acquisition_cost = 50  # Assumed CAC
-                    roi = ((clv_with_margin - acquisition_cost) / acquisition_cost) * 100
-                    st.metric("ROI", f"{roi:.0f}%", help=f"Assuming CAC = AED {acquisition_cost}")
-                
-                # Cluster Assignment
-                st.subheader("🎯 Customer Segment Assignment")
-                
-                cluster_input = pd.DataFrame({
-                    'Importance_Convenience': [imp_conv],
-                    'Importance_Price': [imp_price],
-                    'Importance_Sustainability': [imp_sust],
-                    'Reduce_Waste_Score': [waste_score],
-                    'Eco_Brand_Preference': [eco_brand],
-                    'Social_Influence_Score': [social_score]
-                })
-                
-                cluster_scaler = models['clustering_scaler']
-                cluster_model = models['clustering_model']
-                
-                cluster_input_scaled = cluster_scaler.transform(cluster_input)
-                predicted_cluster = cluster_model.predict(cluster_input_scaled)[0]
-                
-                personas = {
-                    0: '🌱 The Eco-Warriors',
-                    1: '💰 The Budget-Conscious',
-                    2: '⚡ The Convenience Seekers',
-                    3: '😐 The Apathetic'
-                }
-                
-                st.info(f"**Assigned Segment:** Cluster {predicted_cluster} - {personas.get(predicted_cluster, 'Unknown')}")
-        
-        with tab2:
-            st.subheader("📊 Batch Prediction Mode")
-            st.markdown("Upload a CSV file with customer profiles to get predictions for multiple customers at once.")
-            
-            # Sample template
-            sample_data = pd.DataFrame({
-                'Age_Group': ['25-34', '35-44'],
-                'Gender': ['Male', 'Female'],
-                'Income': ['10000-15000', '15000-20000'],
-                'Emirate': ['Dubai', 'Abu Dhabi'],
-                'Importance_Price': [3, 4],
-                'Importance_Sustainability': [4, 3],
-                'Importance_Convenience': [3, 5]
-            })
-            
-            st.download_button(
-                "📥 Download Sample Template",
-                data=sample_data.to_csv(index=False),
-                file_name="batch_prediction_template.csv",
-                mime="text/csv"
-            )
-            
-            uploaded_batch = st.file_uploader("Upload Customer Profiles (CSV)", type=['csv'])
-            
-            if uploaded_batch:
-                batch_df = pd.read_csv(uploaded_batch)
-                st.dataframe(batch_df.head(), use_container_width=True)
-                
-                if st.button("Run Batch Predictions"):
-                    with st.spinner("Processing batch predictions..."):
-                        # This would require proper feature engineering for the uploaded data
-                        st.info("⚠️ Batch prediction feature requires properly formatted input matching all model features. Contact administrator for assistance.")
+                with col_p4:
+                    price_sensitivity = cluster_data['Importance_Price'].mean()
+                    st.metric("Price Sensitivity", f"{price_sensitivity:.2f}/5")
 
     # =========================================================================
     # PAGE 5: MARKET BASKET ANALYSIS
     # =========================================================================
     elif "Market Basket" in page:
-        st.title("🛒 Market Basket Analysis")
+        st.title("🛒 Market Basket Analysis & Product Associations")
         
         st.markdown("""
         <div class='info-box'>
-        <b>Discover product associations</b> using Association Rule Mining to optimize kiosk layout and create bundles.
+        <b>🎯 Objective:</b> Discover which products are frequently purchased together using Association Rule Mining
         </div>
         """, unsafe_allow_html=True)
         
         rules_df = models['association_rules']
         
         if rules_df.empty:
-            st.warning("⚠️ No association rules found with current parameters. Try lowering the thresholds.")
+            st.warning("⚠️ No association rules found. Try lowering the support/confidence thresholds.")
             return
         
         # Filters
+        st.subheader("🔧 Rule Filtering Controls")
         col_f1, col_f2, col_f3 = st.columns(3)
         
         with col_f1:
@@ -1389,7 +1430,7 @@ def main():
                 max_value=float(rules_df['lift'].max()),
                 value=1.2,
                 step=0.1,
-                help="Lift > 1 means items are bought together more than by chance"
+                help="Lift > 1 means products are bought together more than by chance"
             )
         
         with col_f2:
@@ -1399,7 +1440,7 @@ def main():
                 max_value=float(rules_df['confidence'].max()),
                 value=0.1,
                 step=0.05,
-                help="Confidence shows how often the rule is true"
+                help="Probability that consequent is purchased given antecedent"
             )
         
         with col_f3:
@@ -1409,7 +1450,7 @@ def main():
                 max_value=float(rules_df['support'].max()),
                 value=0.05,
                 step=0.01,
-                help="Support shows how frequently the itemset appears"
+                help="How frequently the itemset appears in transactions"
             )
         
         filtered_rules = rules_df[
@@ -1418,22 +1459,26 @@ def main():
             (rules_df['support'] > min_support)
         ]
         
-        st.metric("Rules Found", len(filtered_rules))
+        col_m1, col_m2, col_m3 = st.columns(3)
         
-        # Top Rules
+        with col_m1:
+            st.metric("Total Rules Found", len(filtered_rules))
+        with col_m2:
+            st.metric("Avg. Lift", f"{filtered_rules['lift'].mean():.2f}" if len(filtered_rules) > 0 else "N/A")
+        with col_m3:
+            st.metric("Max Lift", f"{filtered_rules['lift'].max():.2f}" if len(filtered_rules) > 0 else "N/A")
+        
+        # Top Rules Table
         st.subheader("🏆 Top Association Rules")
         
-        display_df = filtered_rules[['antecedents', 'consequents', 'support', 'confidence', 'lift']].head(20)
+        display_rules = filtered_rules.head(20)[['antecedents', 'consequents', 'support', 'confidence', 'lift']]
         st.dataframe(
-            display_df.style.background_gradient(cmap='Greens', subset=['lift', 'confidence']).format({
-                'support': '{:.3f}',
-                'confidence': '{:.3f}',
-                'lift': '{:.2f}'
-            }),
+            display_rules.style.background_gradient(cmap='Greens', subset=['lift', 'confidence'])
+                              .format({'support': '{:.3f}', 'confidence': '{:.3f}', 'lift': '{:.2f}'}),
             use_container_width=True
         )
         
-        # Visualization
+        # Visualizations
         col_v1, col_v2 = st.columns(2)
         
         with col_v1:
@@ -1446,16 +1491,16 @@ def main():
                 x="lift",
                 y="Rule",
                 orientation='h',
-                title="Product Association Strength",
+                title="Strongest Product Associations",
                 color="confidence",
                 color_continuous_scale='Greens',
                 hover_data=['support', 'confidence', 'lift']
             )
-            fig_rules.update_layout(yaxis={'categoryorder': 'total ascending'})
+            fig_rules.update_layout(yaxis={'categoryorder': 'total ascending'}, height=500)
             st.plotly_chart(fig_rules, use_container_width=True)
         
         with col_v2:
-            st.subheader("🎯 Confidence vs Support")
+            st.subheader("🎯 Support vs Confidence Matrix")
             fig_scatter = px.scatter(
                 filtered_rules,
                 x='support',
@@ -1463,45 +1508,35 @@ def main():
                 size='lift',
                 color='lift',
                 hover_data=['antecedents', 'consequents'],
-                title="Rule Quality Matrix",
+                title="Rule Quality Visualization",
                 color_continuous_scale='Greens'
             )
+            fig_scatter.update_layout(height=500)
             st.plotly_chart(fig_scatter, use_container_width=True)
         
-        # Network Graph
+        # Network Visualization
         st.subheader("🕸️ Product Association Network")
         
-        # Create network data
-        top_network_rules = filtered_rules.sort_values('lift', ascending=False).head(20)
-        
-        # Build edge list
-        edges = []
-        for _, row in top_network_rules.iterrows():
-            edges.append({
-                'source': row['antecedents'],
-                'target': row['consequents'],
-                'weight': row['lift']
-            })
-        
-        # Create a simple network visualization using plotly
         import networkx as nx
         
+        top_network_rules = filtered_rules.sort_values('lift', ascending=False).head(20)
+        
         G = nx.DiGraph()
-        for edge in edges:
-            G.add_edge(edge['source'], edge['target'], weight=edge['weight'])
+        for _, row in top_network_rules.iterrows():
+            G.add_edge(row['antecedents'], row['consequents'], weight=row['lift'])
         
         pos = nx.spring_layout(G, k=0.5, iterations=50)
         
-        edge_trace = []
+        edge_traces = []
         for edge in G.edges():
             x0, y0 = pos[edge[0]]
             x1, y1 = pos[edge[1]]
-            edge_trace.append(
+            edge_traces.append(
                 go.Scatter(
                     x=[x0, x1, None],
                     y=[y0, y1, None],
                     mode='lines',
-                    line=dict(width=0.5, color='#888'),
+                    line=dict(width=1, color='#888'),
                     hoverinfo='none',
                     showlegend=False
                 )
@@ -1515,34 +1550,35 @@ def main():
             text=[node for node in G.nodes()],
             textposition="top center",
             marker=dict(
-                size=[G.degree(node) * 10 for node in G.nodes()],
+                size=[G.degree(node) * 15 for node in G.nodes()],
                 color='#2E8B57',
                 line=dict(width=2, color='white')
             ),
             showlegend=False
         )
         
-        fig_network = go.Figure(data=edge_trace + [node_trace])
+        fig_network = go.Figure(data=edge_traces + [node_trace])
         fig_network.update_layout(
-            title="Product Co-occurrence Network",
+            title="Product Co-Occurrence Network (Size = Connection Strength)",
             showlegend=False,
             hovermode='closest',
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            height=600
+            height=600,
+            plot_bgcolor='#F5F7F9'
         )
         st.plotly_chart(fig_network, use_container_width=True)
         
         # Strategic Insights
-        st.subheader("💡 Strategic Recommendations")
+        st.subheader("💡 Strategic Business Recommendations")
         
         col_s1, col_s2 = st.columns(2)
         
         with col_s1:
             st.markdown("""
             <div class='success-box'>
-            <h4>🎁 Bundle Opportunities</h4>
-            <p>Create product bundles based on high-lift associations:</p>
+            <h4>🎁 Product Bundling Opportunities</h4>
+            <p>Create attractive bundles based on high-lift associations:</p>
             <ul>
             """, unsafe_allow_html=True)
             
@@ -1554,8 +1590,8 @@ def main():
         with col_s2:
             st.markdown("""
             <div class='info-box'>
-            <h4>🏪 Layout Optimization</h4>
-            <p>Place these products near each other:</p>
+            <h4>🏪 Kiosk Layout Optimization</h4>
+            <p>Place these products adjacent to each other:</p>
             <ul>
             """, unsafe_allow_html=True)
             
@@ -1564,8 +1600,8 @@ def main():
             
             st.markdown("</ul></div>", unsafe_allow_html=True)
         
-        # Frequent Items
-        st.subheader("📦 Most Popular Products")
+        # Product Popularity
+        st.subheader("📦 Individual Product Popularity")
         
         frequent_itemsets = models['frequent_itemsets']
         single_items = frequent_itemsets[frequent_itemsets['itemsets'].apply(len) == 1].copy()
@@ -1576,25 +1612,168 @@ def main():
             single_items,
             x='product',
             y='support',
-            title="Top 10 Products by Purchase Frequency",
-            labels={'support': 'Support (Frequency)', 'product': 'Product'},
+            title="Top 10 Most Purchased Products",
+            labels={'support': 'Purchase Frequency (Support)', 'product': 'Product'},
             color='support',
             color_continuous_scale='Greens'
         )
+        fig_items.update_layout(height=400)
         st.plotly_chart(fig_items, use_container_width=True)
 
     # =========================================================================
-    # PAGE 6: ADVANCED ANALYTICS
+    # PAGE 6: DATA EXPLORER & QUALITY
     # =========================================================================
-    elif "Advanced Analytics" in page:
-        st.title("📈 Advanced Analytics & Statistical Tests")
+    elif "Data Explorer" in page:
+        st.title("📊 Data Explorer & Quality Assessment")
         
-        tab1, tab2, tab3, tab4 = st.tabs(["📊 Statistical Tests", "🎯 Feature Importance", "📉 Model Diagnostics", "🔄 Comparative Analysis"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📋 Raw Data", "📈 Distributions", "🔗 Correlations", "✅ Quality Checks"])
         
         with tab1:
-            st.subheader("Statistical Hypothesis Testing")
+            st.subheader("Dataset Overview")
             
-            # Perform tests
+            col_ov1, col_ov2, col_ov3, col_ov4 = st.columns(4)
+            
+            with col_ov1:
+                st.metric("Total Records", len(df_filtered))
+            with col_ov2:
+                st.metric("Total Features", len(df_filtered.columns))
+            with col_ov3:
+                st.metric("Categorical Features", len(df_filtered.select_dtypes(include='object').columns))
+            with col_ov4:
+                st.metric("Numerical Features", len(df_filtered.select_dtypes(include=['int64', 'float64']).columns))
+            
+            st.dataframe(df_filtered.head(100), use_container_width=True)
+            
+            st.subheader("Statistical Summary")
+            st.dataframe(df_filtered.describe(), use_container_width=True)
+        
+        with tab2:
+            st.subheader("Feature Distribution Analysis")
+            
+            col_dist1, col_dist2 = st.columns(2)
+            
+            with col_dist1:
+                cat_cols = df_filtered.select_dtypes(include='object').columns.tolist()
+                selected_cat = st.selectbox("Select Categorical Feature", cat_cols)
+                
+                fig_cat = px.histogram(
+                    df_filtered,
+                    x=selected_cat,
+                    color='Likely_to_Use_ReFillHub',
+                    barmode='group',
+                    title=f"Distribution of {selected_cat}",
+                    color_discrete_map={'Yes': '#2E8B57', 'No': '#FF6347'}
+                )
+                st.plotly_chart(fig_cat, use_container_width=True)
+            
+            with col_dist2:
+                num_cols = df_filtered.select_dtypes(include=['int64', 'float64']).columns.tolist()
+                selected_num = st.selectbox("Select Numerical Feature", num_cols)
+                
+                fig_num = px.histogram(
+                    df_filtered,
+                    x=selected_num,
+                    marginal='box',
+                    title=f"Distribution of {selected_num}",
+                    color_discrete_sequence=['#2E8B57']
+                )
+                st.plotly_chart(fig_num, use_container_width=True)
+        
+        with tab3:
+            st.subheader("Correlation Analysis")
+            
+            numeric_cols = df_filtered.select_dtypes(include=['int64', 'float64']).columns
+            corr_matrix = df_filtered[numeric_cols].corr()
+            
+            fig_corr = px.imshow(
+                corr_matrix,
+                title="Feature Correlation Heatmap",
+                color_continuous_scale='RdYlGn',
+                aspect='auto',
+                labels=dict(color="Correlation"),
+                zmin=-1, zmax=1
+            )
+            fig_corr.update_layout(height=600)
+            st.plotly_chart(fig_corr, use_container_width=True)
+            
+            st.subheader("Strongest Correlations")
+            corr_pairs = corr_matrix.unstack().sort_values(ascending=False)
+            corr_pairs = corr_pairs[corr_pairs < 1]
+            top_corr = corr_pairs.head(10)
+            
+            st.dataframe(
+                pd.DataFrame(top_corr).reset_index().rename(columns={0: 'Correlation', 'level_0': 'Feature 1', 'level_1': 'Feature 2'}),
+                use_container_width=True
+            )
+        
+        with tab4:
+            st.subheader("Data Quality Report")
+            
+            col_q1, col_q2 = st.columns(2)
+            
+            with col_q1:
+                st.markdown("#### Missing Values Analysis")
+                missing = df_filtered.isnull().sum()
+                missing_pct = (missing / len(df_filtered) * 100).round(2)
+                missing_df = pd.DataFrame({
+                    'Feature': missing.index,
+                    'Missing Count': missing.values,
+                    'Missing %': missing_pct.values
+                }).sort_values('Missing Count', ascending=False)
+                
+                if missing_df['Missing Count'].sum() == 0:
+                    st.success("✅ No missing values detected!")
+                else:
+                    st.dataframe(missing_df[missing_df['Missing Count'] > 0], use_container_width=True)
+            
+            with col_q2:
+                st.markdown("#### Duplicate Records")
+                duplicates = df_filtered.duplicated().sum()
+                st.metric("Duplicate Rows", duplicates)
+                
+                if duplicates == 0:
+                    st.success("✅ No duplicate records found!")
+                else:
+                    st.warning(f"⚠️ Found {duplicates} duplicate records")
+            
+            st.markdown("#### Data Type Summary")
+            dtype_df = pd.DataFrame({
+                'Feature': df_filtered.dtypes.index,
+                'Data Type': df_filtered.dtypes.values,
+                'Unique Values': [df_filtered[col].nunique() for col in df_filtered.columns],
+                'Sample Value': [df_filtered[col].iloc[0] for col in df_filtered.columns]
+            })
+            st.dataframe(dtype_df, use_container_width=True)
+            
+            st.markdown("#### Outlier Detection (IQR Method)")
+            outlier_summary = []
+            numeric_cols = df_filtered.select_dtypes(include=['int64', 'float64']).columns
+            
+            for col in numeric_cols:
+                Q1 = df_filtered[col].quantile(0.25)
+                Q3 = df_filtered[col].quantile(0.75)
+                IQR = Q3 - Q1
+                outliers = ((df_filtered[col] < (Q1 - 1.5 * IQR)) | (df_filtered[col] > (Q3 + 1.5 * IQR))).sum()
+                outlier_summary.append({
+                    'Feature': col,
+                    'Outliers': outliers,
+                    'Outlier %': f"{outliers/len(df_filtered)*100:.2f}%"
+                })
+            
+            outlier_df = pd.DataFrame(outlier_summary).sort_values('Outliers', ascending=False)
+            st.dataframe(outlier_df, use_container_width=True)
+
+    # =========================================================================
+    # PAGE 7: ADVANCED ANALYTICS
+    # =========================================================================
+    elif "Advanced Analytics" in page:
+        st.title("📈 Advanced Statistical Analytics")
+        
+        tab1, tab2 = st.tabs(["📊 Statistical Tests", "🔬 Hypothesis Testing"])
+        
+        with tab1:
+            st.subheader("Comprehensive Statistical Analysis")
+            
             stat_results = perform_statistical_tests(df_filtered)
             
             col_t1, col_t2 = st.columns(2)
@@ -1603,7 +1782,7 @@ def main():
                 st.markdown("#### Chi-Square Test: Income vs. Adoption")
                 st.markdown("""
                 <div class='info-box'>
-                <b>Hypothesis:</b> Is there a significant relationship between income level and adoption likelihood?
+                <b>Null Hypothesis:</b> Income level and adoption likelihood are independent
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -1616,16 +1795,16 @@ def main():
                     st.metric("P-Value", f"{chi2_result['p_value']:.4f}")
                 
                 if chi2_result['p_value'] < 0.05:
-                    st.success("✅ **Significant relationship found** (p < 0.05). Income level affects adoption.")
+                    st.success("✅ **Reject null hypothesis** (p < 0.05): Income significantly affects adoption")
                 else:
-                    st.info("ℹ️ No significant relationship found (p ≥ 0.05)")
+                    st.info("ℹ️ Cannot reject null hypothesis (p ≥ 0.05)")
                 
-                # Visualize contingency table
+                # Contingency table heatmap
                 contingency = pd.crosstab(df_filtered['Income'], df_filtered['Likely_to_Use_ReFillHub'])
                 fig_chi = px.imshow(
                     contingency,
-                    title="Contingency Table Heatmap",
-                    labels=dict(x="Adoption", y="Income Level", color="Count"),
+                    title="Contingency Table: Income × Adoption",
+                    labels=dict(x="Adoption Decision", y="Income Level", color="Count"),
                     color_continuous_scale='Greens',
                     aspect='auto'
                 )
@@ -1635,7 +1814,7 @@ def main():
                 st.markdown("#### Independent T-Test: Spending Comparison")
                 st.markdown("""
                 <div class='info-box'>
-                <b>Hypothesis:</b> Do adopters spend significantly more than non-adopters?
+                <b>Null Hypothesis:</b> Mean spending is equal for adopters and non-adopters
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -1648,28 +1827,34 @@ def main():
                     st.metric("P-Value", f"{ttest_result['p_value']:.4f}")
                 
                 if ttest_result['p_value'] < 0.05:
-                    st.success("✅ **Significant difference found** (p < 0.05). Adopters spend differently.")
+                    st.success("✅ **Reject null hypothesis** (p < 0.05): Significant spending difference")
                 else:
-                    st.info("ℹ️ No significant difference found (p ≥ 0.05)")
+                    st.info("ℹ️ Cannot reject null hypothesis (p ≥ 0.05)")
                 
-                # Visualize distributions
+                # Distribution comparison
                 fig_dist = go.Figure()
                 
                 adopters = df_filtered[df_filtered['Likely_to_Use_ReFillHub'] == 'Yes']['Willingness_to_Pay_AED']
                 non_adopters = df_filtered[df_filtered['Likely_to_Use_ReFillHub'] == 'No']['Willingness_to_Pay_AED']
                 
-                fig_dist.add_trace(go.Histogram(x=adopters, name='Adopters', opacity=0.7, marker_color='#2E8B57'))
-                fig_dist.add_trace(go.Histogram(x=non_adopters, name='Non-Adopters', opacity=0.7, marker_color='#FF6347'))
+                fig_dist.add_trace(go.Histogram(
+                    x=adopters, name='Adopters',
+                    opacity=0.7, marker_color='#2E8B57'
+                ))
+                fig_dist.add_trace(go.Histogram(
+                    x=non_adopters, name='Non-Adopters',
+                    opacity=0.7, marker_color='#FF6347'
+                ))
                 
                 fig_dist.update_layout(
                     barmode='overlay',
-                    title="Spending Distribution: Adopters vs. Non-Adopters",
+                    title="Spending Distribution Comparison",
                     xaxis_title="Willingness to Pay (AED)",
                     yaxis_title="Frequency"
                 )
                 st.plotly_chart(fig_dist, use_container_width=True)
             
-            # ANOVA Test
+            # ANOVA
             st.markdown("#### One-Way ANOVA: Spending Across Clusters")
             
             cluster_groups = [df_filtered[df_filtered['Cluster'] == i]['Willingness_to_Pay_AED'].values 
@@ -1683,219 +1868,54 @@ def main():
                 st.metric("P-Value", f"{p_value:.4f}")
             
             if p_value < 0.05:
-                st.success("✅ **Significant differences** across clusters (p < 0.05)")
+                st.success("✅ **Significant differences** exist across clusters (p < 0.05)")
             else:
                 st.info("ℹ️ No significant differences found (p ≥ 0.05)")
         
         with tab2:
-            st.subheader("Feature Importance Analysis")
+            st.subheader("Statistical Significance Summary")
             
-            col_fi1, col_fi2 = st.columns(2)
+            st.markdown("""
+            #### Understanding P-Values and Statistical Significance
             
-            with col_fi1:
-                st.markdown("#### Classification Model")
-                feature_imp_clf = models['feature_importance_clf']
-                
-                fig_fi_clf = px.bar(
-                    feature_imp_clf.head(15),
-                    x='Importance',
-                    y='Feature',
-                    orientation='h',
-                    title="Top 15 Features for Adoption Prediction",
-                    color='Importance',
-                    color_continuous_scale='Greens'
-                )
-                fig_fi_clf.update_layout(yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig_fi_clf, use_container_width=True)
-                
-                st.dataframe(feature_imp_clf.head(10), use_container_width=True)
+            - **P-Value < 0.05:** Statistically significant result (reject null hypothesis)
+            - **P-Value ≥ 0.05:** Not statistically significant (fail to reject null hypothesis)
+            - **Confidence Level:** 95% (α = 0.05)
             
-            with col_fi2:
-                st.markdown("#### Regression Model")
-                feature_imp_reg = models['feature_importance_reg']
-                
-                fig_fi_reg = px.bar(
-                    feature_imp_reg.head(15),
-                    x='Importance',
-                    y='Feature',
-                    orientation='h',
-                    title="Top 15 Features for Spending Prediction",
-                    color='Importance',
-                    color_continuous_scale='Blues'
-                )
-                fig_fi_reg.update_layout(yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig_fi_reg, use_container_width=True)
-                
-                st.dataframe(feature_imp_reg.head(10), use_container_width=True)
-        
-        with tab3:
-            st.subheader("Model Diagnostic Plots")
+            #### Key Findings from Our Analysis:
+            """)
             
-            # Classification: ROC Curve
-            st.markdown("#### Classification: ROC Curve")
+            findings = []
             
-            fpr, tpr = metrics['roc_curve']
-            roc_auc = metrics['roc_auc']
+            if chi2_result['p_value'] < 0.05:
+                findings.append("✅ Income level significantly impacts adoption likelihood")
+            else:
+                findings.append("❌ No significant relationship between income and adoption")
             
-            fig_roc = go.Figure()
-            fig_roc.add_trace(go.Scatter(
-                x=fpr, y=tpr,
-                mode='lines',
-                name=f'ROC Curve (AUC = {roc_auc:.3f})',
-                line=dict(color='#2E8B57', width=3)
-            ))
-            fig_roc.add_trace(go.Scatter(
-                x=[0, 1], y=[0, 1],
-                mode='lines',
-                name='Random Classifier',
-                line=dict(color='gray', dash='dash')
-            ))
-            fig_roc.update_layout(
-                title="Receiver Operating Characteristic (ROC) Curve",
-                xaxis_title="False Positive Rate",
-                yaxis_title="True Positive Rate",
-                hovermode='x'
-            )
-            st.plotly_chart(fig_roc, use_container_width=True)
+            if ttest_result['p_value'] < 0.05:
+                findings.append("✅ Adopters and non-adopters have significantly different spending patterns")
+            else:
+                findings.append("❌ No significant spending difference between groups")
             
-            # Confusion Matrix
-            st.markdown("#### Confusion Matrix")
+            if p_value < 0.05:
+                findings.append("✅ Customer clusters show significantly different spending behaviors")
+            else:
+                findings.append("❌ No significant spending differences across clusters")
             
-            cm = metrics['confusion_matrix']
-            fig_cm = px.imshow(
-                cm,
-                labels=dict(x="Predicted", y="Actual", color="Count"),
-                x=['No', 'Yes'],
-                y=['No', 'Yes'],
-                title="Classification Confusion Matrix",
-                color_continuous_scale='Greens',
-                text_auto=True
-            )
-            st.plotly_chart(fig_cm, use_container_width=True)
-            
-            # Regression: Residual Plot
-            st.markdown("#### Regression: Residual Analysis")
-            
-            y_test = metrics['y_test_reg']
-            y_pred = metrics['y_pred_reg']
-            residuals = y_test - y_pred
-            
-            col_res1, col_res2 = st.columns(2)
-            
-            with col_res1:
-                fig_residual = px.scatter(
-                    x=y_pred,
-                    y=residuals,
-                    title="Residual Plot",
-                    labels={'x': 'Predicted Values', 'y': 'Residuals'},
-                    trendline="lowess",
-                    color_discrete_sequence=['#2E8B57']
-                )
-                fig_residual.add_hline(y=0, line_dash="dash", line_color="red")
-                st.plotly_chart(fig_residual, use_container_width=True)
-            
-            with col_res2:
-                fig_qq = go.Figure()
-                fig_qq.add_trace(go.Histogram(
-                    x=residuals,
-                    nbinsx=30,
-                    name='Residuals',
-                    marker_color='#2E8B57'
-                ))
-                fig_qq.update_layout(
-                    title="Residual Distribution",
-                    xaxis_title="Residuals",
-                    yaxis_title="Frequency"
-                )
-                st.plotly_chart(fig_qq, use_container_width=True)
-            
-            # Predicted vs Actual
-            fig_pred_actual = px.scatter(
-                x=y_test,
-                y=y_pred,
-                title="Predicted vs. Actual Spending",
-                labels={'x': 'Actual Spending (AED)', 'y': 'Predicted Spending (AED)'},
-                trendline="ols",
-                color_discrete_sequence=['#228B22']
-            )
-            fig_pred_actual.add_trace(go.Scatter(
-                x=[y_test.min(), y_test.max()],
-                y=[y_test.min(), y_test.max()],
-                mode='lines',
-                name='Perfect Prediction',
-                line=dict(color='red', dash='dash')
-            ))
-            st.plotly_chart(fig_pred_actual, use_container_width=True)
-        
-        with tab4:
-            st.subheader("Comparative Analysis")
-            
-            # Segment Comparison
-            st.markdown("#### Cross-Segment Performance")
-            
-            comparison_metrics = df_filtered.groupby('Cluster').agg({
-                'Likely_to_Use_ReFillHub': lambda x: (x == 'Yes').mean() * 100,
-                'Willingness_to_Pay_AED': 'mean',
-                'Importance_Sustainability': 'mean',
-                'Importance_Price': 'mean',
-                'Importance_Convenience': 'mean',
-                'Cluster': 'count'
-            }).rename(columns={
-                'Likely_to_Use_ReFillHub': 'Adoption_Rate',
-                'Willingness_to_Pay_AED': 'Avg_Spending',
-                'Cluster': 'Size'
-            }).reset_index()
-            
-            st.dataframe(
-                comparison_metrics.style.background_gradient(cmap='Greens').format(precision=2),
-                use_container_width=True
-            )
-            
-            # Multi-metric comparison
-            fig_comparison = make_subplots(
-                rows=2, cols=2,
-                subplot_titles=('Adoption Rate by Cluster', 'Avg. Spending by Cluster',
-                               'Sustainability Score', 'Price Sensitivity')
-            )
-            
-            fig_comparison.add_trace(
-                go.Bar(x=comparison_metrics['Cluster'], y=comparison_metrics['Adoption_Rate'],
-                      marker_color='#2E8B57', name='Adoption Rate'),
-                row=1, col=1
-            )
-            
-            fig_comparison.add_trace(
-                go.Bar(x=comparison_metrics['Cluster'], y=comparison_metrics['Avg_Spending'],
-                      marker_color='#228B22', name='Avg Spending'),
-                row=1, col=2
-            )
-            
-            fig_comparison.add_trace(
-                go.Bar(x=comparison_metrics['Cluster'], y=comparison_metrics['Importance_Sustainability'],
-                      marker_color='#3CB371', name='Sustainability'),
-                row=2, col=1
-            )
-            
-            fig_comparison.add_trace(
-                go.Bar(x=comparison_metrics['Cluster'], y=comparison_metrics['Importance_Price'],
-                      marker_color='#90EE90', name='Price Sensitivity'),
-                row=2, col=2
-            )
-            
-            fig_comparison.update_layout(height=700, showlegend=False, title_text="Multi-Dimensional Cluster Comparison")
-            st.plotly_chart(fig_comparison, use_container_width=True)
+            for finding in findings:
+                st.markdown(f"- {finding}")
 
     # =========================================================================
-    # PAGE 7: BUSINESS RECOMMENDATIONS
+    # PAGE 8: BUSINESS RECOMMENDATIONS
     # =========================================================================
     elif "Business Recommendations" in page:
-        st.title("💡 AI-Generated Business Recommendations")
+        st.title("💡 AI-Generated Strategic Recommendations")
         
         st.markdown("""
         <div class='success-box'>
-        <b>Data-Driven Insights:</b> Actionable strategies generated from comprehensive analysis
+        <b>🎯 Data-Driven Insights:</b> Actionable strategies derived from comprehensive analysis of {0:,} customer profiles
         </div>
-        """, unsafe_allow_html=True)
+        """.format(len(df_filtered)), unsafe_allow_html=True)
         
         recommendations = generate_business_recommendations(df_filtered, models, metrics)
         
@@ -1903,47 +1923,50 @@ def main():
         priority_order = {'HIGH': 0, 'MEDIUM': 1, 'LOW': 2}
         recommendations.sort(key=lambda x: priority_order[x['priority']])
         
+        st.header("🎯 Top Strategic Priorities")
+        
         for idx, rec in enumerate(recommendations, 1):
-            priority_color = {
-                'HIGH': 'error',
-                'MEDIUM': 'warning',
-                'LOW': 'info'
+            priority_colors = {
+                'HIGH': '🔴',
+                'MEDIUM': '🟡',
+                'LOW': '🟢'
             }
             
-            with st.expander(f"**{idx}. {rec['title']}** [{rec['priority']} PRIORITY]", expanded=(rec['priority'] == 'HIGH')):
+            with st.expander(f"{priority_colors[rec['priority']]} **{idx}. {rec['title']}** [{rec['priority']} PRIORITY]", 
+                           expanded=(rec['priority'] == 'HIGH')):
                 st.markdown(f"**Recommendation:** {rec['detail']}")
                 st.markdown(f"**Priority Level:** `{rec['priority']}`")
         
         st.markdown("---")
         
         # ROI Calculator
-        st.header("💰 Business Case & ROI Projection")
+        st.header("💰 Business Case & Financial Projections")
         
         col_roi1, col_roi2 = st.columns(2)
         
         with col_roi1:
-            st.subheader("Input Assumptions")
+            st.subheader("📝 Input Assumptions")
             
             num_kiosks = st.number_input("Number of Kiosks to Deploy", 1, 50, 10)
             kiosk_cost = st.number_input("Cost per Kiosk (AED)", 10000, 100000, 50000, 5000)
-            monthly_operating_cost = st.number_input("Monthly Operating Cost per Kiosk (AED)", 1000, 10000, 3000, 500)
-            customers_per_kiosk_per_day = st.number_input("Expected Customers/Kiosk/Day", 10, 200, 50, 10)
+            monthly_opex = st.number_input("Monthly Operating Cost/Kiosk (AED)", 1000, 10000, 3000, 500)
+            customers_per_day = st.number_input("Expected Customers/Kiosk/Day", 10, 200, 50, 10)
             
-            adoption_rate_assumption = st.slider("Assumed Adoption Rate (%)", 30, 90, 65, 5)
-            avg_transaction = st.number_input("Avg. Transaction Value (AED)", 20, 200, int(avg_wtp), 10)
+            adoption_assumption = st.slider("Assumed Adoption Rate (%)", 30, 90, int(adoption_rate), 5)
+            avg_transaction = st.number_input("Avg. Transaction (AED)", 20, 200, int(avg_wtp), 10)
             gross_margin_pct = st.slider("Gross Margin (%)", 20, 60, 40, 5)
         
         with col_roi2:
-            st.subheader("Financial Projections (Year 1)")
+            st.subheader("📊 Financial Projections (Year 1)")
             
             # Calculations
             initial_investment = num_kiosks * kiosk_cost
-            annual_operating_cost = num_kiosks * monthly_operating_cost * 12
+            annual_opex = num_kiosks * monthly_opex * 12
             
-            daily_transactions = num_kiosks * customers_per_kiosk_per_day * (adoption_rate_assumption / 100)
+            daily_transactions = num_kiosks * customers_per_day * (adoption_assumption / 100)
             annual_revenue = daily_transactions * avg_transaction * 365
             gross_profit = annual_revenue * (gross_margin_pct / 100)
-            net_profit = gross_profit - annual_operating_cost
+            net_profit = gross_profit - annual_opex
             
             payback_period = initial_investment / net_profit if net_profit > 0 else float('inf')
             roi = ((net_profit - initial_investment) / initial_investment * 100) if initial_investment > 0 else 0
@@ -1951,296 +1974,120 @@ def main():
             st.metric("Initial Investment", f"AED {initial_investment:,.0f}")
             st.metric("Annual Revenue", f"AED {annual_revenue:,.0f}")
             st.metric("Gross Profit", f"AED {gross_profit:,.0f}")
-            st.metric("Net Profit (Year 1)", f"AED {net_profit:,.0f}")
-            st.metric("Payback Period", f"{payback_period:.1f} years" if payback_period != float('inf') else "N/A")
+            st.metric("Net Profit (Year 1)", f"AED {net_profit:,.0f}", 
+                     delta_color="normal" if net_profit > 0 else "inverse")
+            
+            if payback_period != float('inf'):
+                st.metric("Payback Period", f"{payback_period:.1f} years")
+            else:
+                st.metric("Payback Period", "N/A (Negative profit)")
+            
             st.metric("ROI", f"{roi:.1f}%")
         
         # Sensitivity Analysis
-        st.subheader("📊 Sensitivity Analysis")
+        st.subheader("📊 Sensitivity Analysis: Impact of Adoption Rate")
         
         adoption_rates = np.arange(30, 91, 10)
-        net_profits = []
+        revenues = []
+        profits = []
         
         for rate in adoption_rates:
-            daily_trans = num_kiosks * customers_per_kiosk_per_day * (rate / 100)
+            daily_trans = num_kiosks * customers_per_day * (rate / 100)
             annual_rev = daily_trans * avg_transaction * 365
             gross_prof = annual_rev * (gross_margin_pct / 100)
-            net_prof = gross_prof - annual_operating_cost
-            net_profits.append(net_prof)
+            net_prof = gross_prof - annual_opex
+            
+            revenues.append(annual_rev)
+            profits.append(net_prof)
         
         fig_sensitivity = go.Figure()
+        
         fig_sensitivity.add_trace(go.Scatter(
-            x=adoption_rates,
-            y=net_profits,
+            x=adoption_rates, y=revenues,
             mode='lines+markers',
-            name='Net Profit',
+            name='Annual Revenue',
             line=dict(color='#2E8B57', width=3),
             marker=dict(size=10)
         ))
-        fig_sensitivity.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+        
+        fig_sensitivity.add_trace(go.Scatter(
+            x=adoption_rates, y=profits,
+            mode='lines+markers',
+            name='Net Profit',
+            line=dict(color='#228B22', width=3),
+            marker=dict(size=10)
+        ))
+        
+        fig_sensitivity.add_hline(y=0, line_dash="dash", line_color="red", 
+                                 annotation_text="Break-even Line")
+        
         fig_sensitivity.update_layout(
-            title="Net Profit Sensitivity to Adoption Rate",
+            title="Financial Sensitivity to Adoption Rate",
             xaxis_title="Adoption Rate (%)",
-            yaxis_title="Net Profit (AED)",
-            hovermode='x'
+            yaxis_title="Amount (AED)",
+            hovermode='x',
+            height=400
         )
+        
         st.plotly_chart(fig_sensitivity, use_container_width=True)
         
-        # Strategic Roadmap
+        # Implementation Roadmap
+        st.markdown("---")
         st.header("🗺️ Strategic Implementation Roadmap")
         
         phases = [
             {
-                'phase': 'Phase 1: Pilot (Months 1-3)',
+                'phase': 'Phase 1: Pilot Launch (Months 1-3)',
                 'objectives': [
-                    '🎯 Deploy 2-3 kiosks in high-traffic locations (Dubai Mall, Marina)',
-                    '📊 Test product mix and pricing strategies',
-                    '🔍 Gather customer feedback and refine UX',
-                    '💰 Target: Break-even on pilot kiosks'
-                ]
+                    '🎯 Deploy 2-3 kiosks in high-traffic locations (Dubai Mall, Marina Mall)',
+                    '📊 Test product mix, pricing, and UX with real customers',
+                    '🔍 Gather feedback through surveys and app analytics',
+                    '💰 Target: Break-even on pilot kiosks',
+                    '📱 Launch MVP mobile app with basic features'
+                ],
+                'kpis': 'Daily transactions, Customer satisfaction, Product mix optimization'
             },
             {
-                'phase': 'Phase 2: Expansion (Months 4-9)',
+                'phase': 'Phase 2: Market Validation (Months 4-6)',
                 'objectives': [
-                    '🚀 Scale to 10-15 kiosks across Dubai & Abu Dhabi',
-                    '🤝 Establish partnerships with retailers (Carrefour, Lulu)',
-                    '📱 Launch mobile app with loyalty program',
-                    '💰 Target: 30% of kiosks profitable'
-                ]
+                    '📈 Analyze pilot data and refine business model',
+                    '🤝 Establish partnerships with 2-3 major retailers',
+                    '💳 Integrate advanced payment options (Apple Pay, Google Pay)',
+                    '🎁 Launch loyalty program based on cluster insights',
+                    '📣 Begin targeted marketing campaigns'
+                ],
+                'kpis': 'Retention rate, Repeat purchase rate, Customer acquisition cost'
             },
             {
-                'phase': 'Phase 3: Optimization (Months 10-12)',
+                'phase': 'Phase 3: Expansion (Months 7-12)',
                 'objectives': [
-                    '🎨 Optimize product mix based on basket analysis',
-                    '🎁 Launch bundled offerings and subscriptions',
+                    '🚀 Scale to 15-20 kiosks across Dubai & Abu Dhabi',
+                    '🛒 Implement product bundling based on basket analysis',
+                    '🌱 Launch sustainability tracking feature in app',
+                    '💰 Target: 30% of kiosks achieving profitability',
+                    '🎯 Focus on high-value customer segments (Clusters 0 & 2)'
+                ],
+                'kpis': 'Revenue per kiosk, Market share, Brand awareness'
+            },
+            {
+                'phase': 'Phase 4: Optimization & Scale (Year 2+)',
+                'objectives': [
+                    '📊 Data-driven product mix optimization',
                     '🌍 Expand to Sharjah and Northern Emirates',
-                    '💰 Target: Break-even on total operations'
-                ]
-            },
-            {
-                'phase': 'Phase 4: Scale (Year 2+)',
-                'objectives': [
-                    '📈 Expand to 50+ kiosks UAE-wide',
-                    '🏪 Franchise model for rapid expansion',
-                    '🌐 Regional expansion (Saudi Arabia, Qatar)',
-                    '💰 Target: 40%+ ROI'
-                ]
+                    '🏢 Explore B2B partnerships (corporate offices, hotels)',
+                    '🌐 Consider regional expansion (Saudi Arabia, Qatar)',
+                    '💼 Explore franchise opportunities'
+                ],
+                'kpis': 'Profitability, Market penetration, Customer lifetime value'
             }
         ]
         
         for phase in phases:
             with st.expander(f"**{phase['phase']}**"):
+                st.markdown("**Key Objectives:**")
                 for obj in phase['objectives']:
                     st.markdown(f"- {obj}")
-
-    # =========================================================================
-    # PAGE 8: MODEL PERFORMANCE
-    # =========================================================================
-    elif "Model Performance" in page:
-        st.title("🤖 Model Performance & Methodology")
-        
-        st.markdown("""
-        <div class='info-box'>
-        <b>Technical Overview:</b> Comprehensive evaluation of all ML models used in this dashboard
-        </div>
-        """, unsafe_allow_html=True)
-        
-        tab1, tab2, tab3, tab4 = st.tabs(["🎯 Classification", "💰 Regression", "🧩 Clustering", "🛒 Association Rules"])
-        
-        with tab1:
-            st.subheader("Classification Model: Adoption Prediction")
-            
-            col_c1, col_c2 = st.columns([1, 2])
-            
-            with col_c1:
-                st.markdown("**Algorithm:** Random Forest Classifier")
-                st.markdown("**Task:** Predict Yes/No for ReFill Hub adoption")
-                st.markdown("**Features:** " + str(len(cat_features) + len(num_features)))
-                st.markdown("**Training Samples:** " + f"{int(len(df)*0.8):,}")
-                st.markdown("**Test Samples:** " + f"{int(len(df)*0.2):,}")
-                
-                st.divider()
-                
-                st.metric("Overall Accuracy", f"{metrics['classification_report']['accuracy']:.2%}")
-                st.metric("Cross-Validation Accuracy", f"{metrics['cv_mean']:.2%} ± {metrics['cv_std']:.2%}")
-                st.metric("ROC-AUC Score", f"{metrics['roc_auc']:.3f}")
-            
-            with col_c2:
-                report = metrics['classification_report']
-                
-                class_df = pd.DataFrame({
-                    'Metric': ['Precision', 'Recall', 'F1-Score'],
-                    'No (Negative)': [report['0']['precision'], report['0']['recall'], report['0']['f1-score']],
-                    'Yes (Positive)': [report['1']['precision'], report['1']['recall'], report['1']['f1-score']]
-                })
-                
-                fig_metrics = go.Figure(data=[
-                    go.Bar(name='No', x=class_df['Metric'], y=class_df['No (Negative)'], marker_color='#FF6347'),
-                    go.Bar(name='Yes', x=class_df['Metric'], y=class_df['Yes (Positive)'], marker_color='#2E8B57')
-                ])
-                fig_metrics.update_layout(
-                    title="Classification Metrics by Class",
-                    barmode='group',
-                    yaxis_title="Score",
-                    yaxis_range=[0, 1]
-                )
-                st.plotly_chart(fig_metrics, use_container_width=True)
-            
-            st.markdown("#### Model Interpretation")
-            st.markdown("""
-            - **Precision:** Of all predicted "Yes", how many are actually correct
-            - **Recall:** Of all actual "Yes", how many did we correctly identify
-            - **F1-Score:** Harmonic mean of precision and recall (balanced metric)
-            - **ROC-AUC:** Area under ROC curve; >0.8 is excellent
-            """)
-        
-        with tab2:
-            st.subheader("Regression Model: Spending Prediction")
-            
-            col_r1, col_r2 = st.columns([1, 2])
-            
-            with col_r1:
-                st.markdown("**Algorithm:** Random Forest Regressor")
-                st.markdown("**Task:** Predict willingness to pay (AED)")
-                st.markdown("**Features:** " + str(len(cat_features) + len(num_features)))
-                st.markdown("**Training Samples:** " + f"{int(len(df)*0.8):,}")
-                st.markdown("**Test Samples:** " + f"{int(len(df)*0.2):,}")
-                
-                st.divider()
-                
-                st.metric("R² Score", f"{metrics['r2_score']:.3f}", help="1.0 = perfect fit, 0.0 = no predictive power")
-                st.metric("RMSE", f"AED {metrics['rmse']:.2f}", help="Average prediction error")
-                st.metric("MAE", f"AED {metrics['mae']:.2f}", help="Mean absolute error")
-            
-            with col_r2:
-                y_test = metrics['y_test_reg']
-                y_pred = metrics['y_pred_reg']
-                
-                fig_scatter = px.scatter(
-                    x=y_test,
-                    y=y_pred,
-                    labels={'x': 'Actual Spending (AED)', 'y': 'Predicted Spending (AED)'},
-                    title="Actual vs. Predicted Spending",
-                    trendline="ols",
-                    color_discrete_sequence=['#2E8B57']
-                )
-                fig_scatter.add_trace(go.Scatter(
-                    x=[y_test.min(), y_test.max()],
-                    y=[y_test.min(), y_test.max()],
-                    mode='lines',
-                    name='Perfect Prediction',
-                    line=dict(color='red', dash='dash')
-                ))
-                st.plotly_chart(fig_scatter, use_container_width=True)
-            
-            st.markdown("#### Model Interpretation")
-            st.markdown("""
-            - **R² (Coefficient of Determination):** Proportion of variance explained by the model
-                - 1.0 = Perfect predictions
-                - 0.7-0.9 = Strong model
-                - 0.4-0.7 = Moderate model
-            - **RMSE (Root Mean Squared Error):** Average prediction error in AED
-            - **MAE (Mean Absolute Error):** Average absolute difference between predictions and actuals
-            """)
-        
-        with tab3:
-            st.subheader("Clustering Model: Customer Segmentation")
-            
-            col_cl1, col_cl2 = st.columns([1, 2])
-            
-            with col_cl1:
-                st.markdown("**Algorithm:** K-Means Clustering")
-                st.markdown("**Task:** Segment customers into personas")
-                st.markdown("**Features:** " + str(len(cluster_features)))
-                st.markdown("**Optimal Clusters:** 4")
-                st.markdown("**Total Samples:** " + f"{len(df):,}")
-                
-                st.divider()
-                
-                st.metric("Silhouette Score", f"{metrics['silhouette_score']:.3f}", 
-                         help="Measures cluster separation. Range: -1 to 1. >0.3 is good.")
-            
-            with col_cl2:
-                cluster_sizes = models['cluster_sizes']
-                
-                fig_cluster_dist = px.pie(
-                    values=cluster_sizes.values,
-                    names=[f"Cluster {i}" for i in cluster_sizes.index],
-                    title="Cluster Size Distribution",
-                    color_discrete_sequence=px.colors.qualitative.Set2
-                )
-                st.plotly_chart(fig_cluster_dist, use_container_width=True)
-            
-            st.markdown("#### Cluster Quality Metrics")
-            st.markdown("""
-            - **Silhouette Score:** Measures how similar points are to their own cluster vs. other clusters
-                - 0.7-1.0: Strong, well-separated clusters
-                - 0.5-0.7: Reasonable structure
-                - 0.25-0.5: Weak structure (typical for survey data)
-                - <0.25: No substantial structure
-            - Our score of **{:.3f}** indicates reasonable cluster separation for behavioral data
-            """.format(metrics['silhouette_score']))
-        
-        with tab4:
-            st.subheader("Association Rules: Market Basket Analysis")
-            
-            rules_df = models['association_rules']
-            
-            col_ar1, col_ar2 = st.columns([1, 2])
-            
-            with col_ar1:
-                st.markdown("**Algorithm:** Apriori")
-                st.markdown("**Task:** Discover product co-purchase patterns")
-                st.markdown("**Min Support:** 5%")
-                st.markdown("**Min Confidence:** Variable")
-                st.markdown("**Min Lift:** 1.0")
-                
-                st.divider()
-                
-                st.metric("Total Rules Found", len(rules_df))
-                st.metric("Avg. Lift", f"{rules_df['lift'].mean():.2f}" if not rules_df.empty else "N/A")
-                st.metric("Max Lift", f"{rules_df['lift'].max():.2f}" if not rules_df.empty else "N/A")
-            
-            with col_ar2:
-                if not rules_df.empty:
-                    fig_lift_dist = px.histogram(
-                        rules_df,
-                        x='lift',
-                        nbins=30,
-                        title="Distribution of Lift Values",
-                        labels={'lift': 'Lift', 'count': 'Frequency'},
-                        color_discrete_sequence=['#2E8B57']
-                    )
-                    fig_lift_dist.add_vline(x=1.0, line_dash="dash", line_color="red", annotation_text="Lift = 1 (Independence)")
-                    st.plotly_chart(fig_lift_dist, use_container_width=True)
-            
-            st.markdown("#### Association Metrics Explained")
-            st.markdown("""
-            - **Support:** How frequently the itemset appears (e.g., 0.1 = 10% of transactions)
-            - **Confidence:** How often the rule is true (If X, then Y is true X% of the time)
-            - **Lift:** How much more likely items are purchased together vs. independently
-                - Lift = 1: No association (random)
-                - Lift > 1: Positive association (bought together more than chance)
-                - Lift < 1: Negative association (bought together less than chance)
-            """)
-        
-        # Model Comparison Summary
-        st.markdown("---")
-        st.header("📊 Model Performance Summary")
-        
-        summary_data = {
-            'Model': ['Classification', 'Regression', 'Clustering', 'Association'],
-            'Algorithm': ['Random Forest', 'Random Forest', 'K-Means', 'Apriori'],
-            'Primary Metric': [
-                f"{metrics['classification_report']['accuracy']:.2%} Accuracy",
-                f"{metrics['r2_score']:.3f} R²",
-                f"{metrics['silhouette_score']:.3f} Silhouette",
-                f"{len(rules_df)} Rules"
-            ],
-            'Status': ['✅ Excellent', '✅ Good', '✅ Good', '✅ Sufficient']
-        }
-        
-        st.table(pd.DataFrame(summary_data))
+                st.markdown(f"**Success Metrics:** {phase['kpis']}")
 
     # =========================================================================
     # PAGE 9: EXPORT & DOWNLOAD
@@ -2250,273 +2097,490 @@ def main():
         
         st.markdown("""
         <div class='success-box'>
-        <b>Download all insights, predictions, and data</b> for further analysis or reporting
+        <b>📦 Complete Package:</b> Download all data, reports, predictions, and deployment code
         </div>
         """, unsafe_allow_html=True)
         
-        tab1, tab2, tab3 = st.tabs(["📊 Data Exports", "📈 Reports", "💻 Code & API"])
+        tab1, tab2, tab3 = st.tabs(["📊 Data Exports", "📄 Reports", "💻 Code Templates"])
         
         with tab1:
-            st.subheader("Download Processed Data")
+            st.subheader("📥 Downloadable Datasets")
             
             col_d1, col_d2 = st.columns(2)
             
             with col_d1:
-                st.markdown("#### Full Dataset with Clusters")
+                st.markdown("#### 🗂️ Complete Dataset with Clusters")
                 st.download_button(
-                    label="📥 Download CSV",
+                    label="📥 Download Full Dataset (CSV)",
                     data=df.to_csv(index=False),
-                    file_name="refillhub_data_with_clusters.csv",
-                    mime="text/csv"
+                    file_name="refillhub_complete_data.csv",
+                    mime="text/csv",
+                    use_container_width=True
                 )
                 
-                st.markdown("#### Cluster Profiles")
+                st.markdown("#### 📊 Cluster Profiles")
                 cluster_profiles = models['cluster_profiles']
                 st.download_button(
-                    label="📥 Download Cluster Profiles",
+                    label="📥 Download Cluster Profiles (CSV)",
                     data=cluster_profiles.to_csv(),
                     file_name="cluster_profiles.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    use_container_width=True
                 )
                 
-                st.markdown("#### Association Rules")
+                st.markdown("#### 🔗 Association Rules")
                 if not models['association_rules'].empty:
                     st.download_button(
-                        label="📥 Download Association Rules",
+                        label="📥 Download Association Rules (CSV)",
                         data=models['association_rules'].to_csv(index=False),
                         file_name="association_rules.csv",
-                        mime="text/csv"
+                        mime="text/csv",
+                        use_container_width=True
                     )
             
             with col_d2:
-                st.markdown("#### Feature Importance (Classification)")
-                st.download_button(
-                    label="📥 Download Feature Importance",
-                    data=models['feature_importance_clf'].to_csv(index=False),
-                    file_name="feature_importance_classification.csv",
-                    mime="text/csv"
-                )
+                st.markdown("#### 🎯 Classification Feature Importance")
+                if 'feature_importance_clf' in models:
+                    st.download_button(
+                        label="📥 Download Feature Importance (CSV)",
+                        data=models['feature_importance_clf'].to_csv(index=False),
+                        file_name="feature_importance_classification.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
                 
-                st.markdown("#### Feature Importance (Regression)")
+                st.markdown("#### 🔍 Filtered Dataset")
                 st.download_button(
-                    label="📥 Download Feature Importance",
-                    data=models['feature_importance_reg'].to_csv(index=False),
-                    file_name="feature_importance_regression.csv",
-                    mime="text/csv"
-                )
-                
-                st.markdown("#### Filtered Dataset")
-                st.download_button(
-                    label="📥 Download Filtered Data",
+                    label="📥 Download Filtered Data (CSV)",
                     data=df_filtered.to_csv(index=False),
                     file_name="refillhub_filtered_data.csv",
-                    mime="text/csv"
+                    mime="text/csv",
+                    use_container_width=True
+                )
+                
+                st.markdown("#### 📈 Model Performance Metrics")
+                metrics_export = pd.DataFrame(metrics['classification']).T
+                st.download_button(
+                    label="📥 Download Model Metrics (CSV)",
+                    data=metrics_export.to_csv(),
+                    file_name="model_performance_metrics.csv",
+                    mime="text/csv",
+                    use_container_width=True
                 )
         
         with tab2:
-            st.subheader("Generate Reports")
+            st.subheader("📄 Comprehensive Reports")
             
-            st.markdown("#### Executive Summary Report")
+            # Executive Summary Report
+            st.markdown("#### 📊 Executive Summary Report")
             
-            summary_text = f"""
+            summary_report = f"""
 # ReFill Hub: Executive Summary Report
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-## Key Metrics
-- **Total Respondents:** {len(df):,}
-- **Adoption Rate:** {(df['Likely_to_Use_ReFillHub'] == 'Yes').mean() * 100:.1f}%
-- **Average Willingness to Pay:** AED {df['Willingness_to_Pay_AED'].mean():.2f}
-- **Customer Segments Identified:** 4
+## Business Overview
+- **Market Size:** {len(df):,} survey respondents
+- **Target Market:** UAE residents (7 Emirates)
+- **Business Model:** Automated refill kiosks for household products
 
-## Top Insights
-1. Cluster 0 shows highest sustainability scores and adoption likelihood
-2. Dubai and Abu Dhabi represent 70% of high-value customers
-3. Mobile payment preference correlates with higher spending
+## Key Performance Indicators
+- **Adoption Rate:** {adoption_rate:.1f}%
+- **Average Willingness to Pay:** AED {avg_wtp:.2f}
+- **High-Value Customer Segment:** {(df['Willingness_to_Pay_AED'] > df['Willingness_to_Pay_AED'].quantile(0.75)).sum():,} customers
+- **Market Awareness (Plastic Ban):** {(df['Aware_Plastic_Ban'] == 'Yes').mean()*100:.1f}%
+
+## Customer Segmentation
+{models['cluster_sizes'].to_string()}
 
 ## Model Performance
-- Classification Accuracy: {metrics['classification_report']['accuracy']:.2%}
-- Regression R² Score: {metrics['r2_score']:.3f}
-- Clustering Silhouette: {metrics['silhouette_score']:.3f}
+- **Best Classification Model:** {max(metrics['classification'], key=lambda x: metrics['classification'][x]['Accuracy'])}
+  - Accuracy: {max(m['Accuracy'] for m in metrics['classification'].values()):.2%}
+  - Precision: {max(m['Precision'] for m in metrics['classification'].values()):.2%}
+  - Recall: {max(m['Recall'] for m in metrics['classification'].values()):.2%}
 
-## Recommendations
-1. Deploy first kiosks in Dubai Mall and Marina
-2. Target Cluster 0 (Eco-Warriors) with sustainability messaging
+- **Best Regression Model:** {max(metrics['regression'], key=lambda x: metrics['regression'][x]['R2'])}
+  - R² Score: {max(m['R2'] for m in metrics['regression'].values()):.4f}
+  - RMSE: AED {min(m['RMSE'] for m in metrics['regression'].values()):.2f}
+
+## Strategic Recommendations
+1. Target Cluster 0 (Eco-Warriors) with sustainability messaging
+2. Deploy first kiosks in Dubai Mall and high-footfall supermarkets
 3. Implement mobile-first payment experience
-            """
+4. Create product bundles based on association rules
+5. Set competitive pricing around AED {df['Willingness_to_Pay_AED'].median():.2f}
+
+## Market Opportunity
+- **Addressable Market:** {(df['Likely_to_Use_ReFillHub'] == 'Yes').sum():,} potential adopters
+- **Estimated Year 1 Revenue:** AED {(df[df['Likely_to_Use_ReFillHub'] == 'Yes']['Willingness_to_Pay_AED'].sum() * 12):,.2f} (assuming monthly purchases)
+"""
             
             st.download_button(
                 label="📥 Download Executive Summary (TXT)",
-                data=summary_text,
-                file_name="executive_summary.txt",
-                mime="text/plain"
+                data=summary_report,
+                file_name="executive_summary_report.txt",
+                mime="text/plain",
+                use_container_width=True
             )
             
-            st.markdown("#### Model Performance Report")
+            # Technical Report
+            st.markdown("#### 🔬 Technical Model Performance Report")
             
-            perf_report = f"""
-# Model Performance Technical Report
+            tech_report = f"""
+# ReFill Hub: Technical Model Performance Report
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-## Classification Model
-- Algorithm: Random Forest Classifier
-- Accuracy: {metrics['classification_report']['accuracy']:.4f}
-- Precision (Yes): {metrics['classification_report']['1']['precision']:.4f}
-- Recall (Yes): {metrics['classification_report']['1']['recall']:.4f}
-- F1-Score (Yes): {metrics['classification_report']['1']['f1-score']:.4f}
-- ROC-AUC: {metrics['roc_auc']:.4f}
+## Classification Models Comparison
 
-## Regression Model
-- Algorithm: Random Forest Regressor
-- R² Score: {metrics['r2_score']:.4f}
-- RMSE: {metrics['rmse']:.2f} AED
-- MAE: {metrics['mae']:.2f} AED
+"""
+            
+            for model_name, model_metrics in metrics['classification'].items():
+                tech_report += f"""
+### {model_name}
+- Accuracy: {model_metrics['Accuracy']:.4f}
+- Precision: {model_metrics['Precision']:.4f}
+- Recall: {model_metrics['Recall']:.4f}
+- F1-Score: {model_metrics['F1 Score']:.4f}
+"""
+                if 'ROC_AUC' in model_metrics:
+                    tech_report += f"- ROC-AUC: {model_metrics['ROC_AUC']:.4f}\n"
+                tech_report += "\n"
+            
+            tech_report += """
+## Regression Models Comparison
 
-## Clustering Model
+"""
+            
+            for model_name, model_metrics in metrics['regression'].items():
+                tech_report += f"""
+### {model_name}
+- R² Score: {model_metrics['R2']:.4f}
+- RMSE: {model_metrics['RMSE']:.2f} AED
+- MAE: {model_metrics['MAE']:.2f} AED
+
+"""
+            
+            tech_report += f"""
+## Clustering Analysis
 - Algorithm: K-Means (k=4)
 - Silhouette Score: {metrics['silhouette_score']:.4f}
+- Features: {', '.join(cluster_features)}
 
 ## Association Rules
-- Total Rules: {len(models['association_rules'])}
-- Avg Lift: {models['association_rules']['lift'].mean():.2f if not models['association_rules'].empty else 'N/A'}
-            """
+- Total Rules Generated: {len(models['association_rules'])}
+- Average Lift: {models['association_rules']['lift'].mean():.2f if not models['association_rules'].empty else 'N/A'}
+- Max Lift: {models['association_rules']['lift'].max():.2f if not models['association_rules'].empty else 'N/A'}
+
+## Methodology
+- Train/Test Split: 80/20
+- Cross-Validation: 5-fold
+- Feature Engineering: Family size conversion, one-hot encoding for categoricals
+- Scaling: StandardScaler for numerical features
+"""
             
             st.download_button(
-                label="📥 Download Performance Report (TXT)",
-                data=perf_report,
-                file_name="model_performance_report.txt",
-                mime="text/plain"
+                label="📥 Download Technical Report (TXT)",
+                data=tech_report,
+                file_name="technical_model_report.txt",
+                mime="text/plain",
+                use_container_width=True
             )
         
         with tab3:
-            st.subheader("Code Snippets & API Templates")
+            st.subheader("💻 Production Deployment Code")
             
-            st.markdown("#### Python: Load and Predict")
+            # Python Prediction Template
+            st.markdown("#### 🐍 Python: Prediction Script")
             
             python_code = '''
+"""
+ReFill Hub: Customer Prediction Script
+Use this script to make predictions on new customer data
+"""
+
 import pandas as pd
 import pickle
+import numpy as np
 
 # Load the trained model
-with open('refillhub_classifier.pkl', 'rb') as f:
-    model = pickle.load(f)
+def load_model(model_path):
+    with open(model_path, 'rb') as f:
+        model = pickle.load(f)
+    return model
 
-# Prepare new customer data
-new_customer = pd.DataFrame({
-    'Age_Group': ['25-34'],
-    'Income': ['10000-15000'],
-    'Importance_Sustainability': [4],
-    # ... add all required features
-})
+# Prepare customer data
+def prepare_input(customer_data):
+    """
+    customer_data: dict with keys matching feature names
+    """
+    df = pd.DataFrame([customer_data])
+    
+    # Feature engineering (match training pipeline)
+    if 'Family_Size' in df.columns:
+        def process_family(val):
+            if '5+' in str(val): return 5.0
+            if '1-2' in str(val): return 1.5
+            if '3-4' in str(val): return 3.5
+            return 3.0
+        df['Family_Size_Num'] = df['Family_Size'].apply(process_family)
+    
+    return df
 
 # Make prediction
-prediction = model.predict(new_customer)
-probability = model.predict_proba(new_customer)
+def predict_customer(model, customer_data):
+    input_df = prepare_input(customer_data)
+    
+    # Classification
+    adoption_pred = model.predict(input_df)[0]
+    adoption_prob = model.predict_proba(input_df)[0]
+    
+    return {
+        'will_adopt': bool(adoption_pred),
+        'adoption_probability': float(adoption_prob[1]),
+        'confidence': f"{adoption_prob[1]*100:.1f}%"
+    }
 
-print(f"Prediction: {'Will Adopt' if prediction[0] == 1 else 'Will Not Adopt'}")
-print(f"Confidence: {probability[0][1]*100:.1f}%")
+# Example usage
+if __name__ == '__main__':
+    # Load model
+    classifier = load_model('refillhub_classifier.pkl')
+    
+    # New customer profile
+    new_customer = {
+        'Age_Group': '25-34',
+        'Gender': 'Female',
+        'Income': '10000-15000',
+        'Emirate': 'Dubai',
+        'Importance_Price': 3,
+        'Importance_Sustainability': 4,
+        'Importance_Convenience': 4,
+        'Family_Size': '3-4',
+        # ... add all other required features
+    }
+    
+    # Predict
+    result = predict_customer(classifier, new_customer)
+    print(f"Prediction: {result}")
 '''
-            st.code(python_code, language='python')
             
+            st.code(python_code, language='python')
             st.download_button(
                 label="📥 Download Python Template",
                 data=python_code,
-                file_name="prediction_template.py",
-                mime="text/plain"
+                file_name="refillhub_prediction.py",
+                mime="text/plain",
+                use_container_width=True
             )
             
-            st.markdown("#### Flask API Example")
+            # Flask API Template
+            st.markdown("#### 🌐 Flask REST API Template")
             
             flask_code = '''
+"""
+ReFill Hub: REST API for Production Deployment
+Run: python api.py
+Endpoint: http://localhost:5000/predict
+"""
+
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pandas as pd
 import pickle
+import numpy as np
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for frontend integration
 
-# Load model at startup
-model = pickle.load(open('refillhub_model.pkl', 'rb'))
+# Load models at startup
+classifier = pickle.load(open('models/refillhub_classifier.pkl', 'rb'))
+regressor = pickle.load(open('models/refillhub_regressor.pkl', 'rb'))
+
+def prepare_features(data):
+    """Prepare features to match training pipeline"""
+    df = pd.DataFrame([data])
+    
+    # Feature engineering
+    if 'Family_Size' in df.columns:
+        def process_family(val):
+            if '5+' in str(val): return 5.0
+            if '1-2' in str(val): return 1.5
+            if '3-4' in str(val): return 3.5
+            return 3.0
+        df['Family_Size_Num'] = df['Family_Size'].apply(process_family)
+    
+    return df
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy', 'version': '1.0'})
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    data = request.json
-    df = pd.DataFrame([data])
-    prediction = model.predict(df)[0]
-    probability = model.predict_proba(df)[0][1]
+    try:
+        # Get request data
+        data = request.json
+        
+        # Prepare features
+        features = prepare_features(data)
+        
+        # Make predictions
+        adoption_pred = classifier.predict(features)[0]
+        adoption_prob = classifier.predict_proba(features)[0][1]
+        spending_pred = regressor.predict(features)[0]
+        
+        # Prepare response
+        response = {
+            'success': True,
+            'predictions': {
+                'will_adopt': bool(adoption_pred),
+                'adoption_probability': float(adoption_prob),
+                'predicted_spending': float(spending_pred),
+                'customer_segment': determine_segment(data),
+                'recommendation': generate_recommendation(adoption_prob, spending_pred)
+            }
+        }
+        
+        return jsonify(response)
     
-    return jsonify({
-        'prediction': 'adopt' if prediction == 1 else 'no_adopt',
-        'probability': float(probability),
-        'confidence': f"{probability*100:.1f}%"
-    })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+
+def determine_segment(data):
+    """Determine customer segment based on attributes"""
+    if data.get('Importance_Sustainability', 0) >= 4:
+        return 'Eco-Warrior'
+    elif data.get('Importance_Price', 0) >= 4:
+        return 'Value Seeker'
+    elif data.get('Importance_Convenience', 0) >= 4:
+        return 'Convenience Seeker'
+    else:
+        return 'Skeptic'
+
+def generate_recommendation(prob, spend):
+    """Generate personalized recommendation"""
+    if prob > 0.7 and spend > 100:
+        return 'High-value prospect: Offer premium subscription'
+    elif prob > 0.5:
+        return 'Good prospect: Target with introductory offer'
+    else:
+        return 'Low probability: Require strong incentives'
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5000)
 '''
-            st.code(flask_code, language='python')
             
+            st.code(flask_code, language='python')
             st.download_button(
-                label="📥 Download Flask API Template",
+                label="📥 Download Flask API",
                 data=flask_code,
-                file_name="flask_api.py",
-                mime="text/plain"
+                file_name="refillhub_api.py",
+                mime="text/plain",
+                use_container_width=True
             )
             
-            st.markdown("#### SQL Query Generator")
+            # SQL Queries
+            st.markdown("#### 🗄️ SQL Database Schema & Queries")
             
-            sql_template = f'''
--- Create table for storing predictions
-CREATE TABLE refillhub_predictions (
-    prediction_id INT PRIMARY KEY AUTO_INCREMENT,
-    customer_id VARCHAR(50),
-    prediction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    adoption_prediction BOOLEAN,
-    adoption_probability FLOAT,
-    predicted_spending DECIMAL(10, 2),
-    cluster_segment INT,
-    features JSON
+            sql_code = f'''
+-- ReFill Hub Database Schema
+
+-- Customer Profiles Table
+CREATE TABLE customers (
+    customer_id VARCHAR(50) PRIMARY KEY,
+    age_group VARCHAR(20),
+    gender VARCHAR(20),
+    emirate VARCHAR(50),
+    income_level VARCHAR(30),
+    family_size VARCHAR(10),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Insert sample prediction
-INSERT INTO refillhub_predictions 
-(customer_id, adoption_prediction, adoption_probability, predicted_spending, cluster_segment)
-VALUES ('CUST001', TRUE, 0.85, 125.50, 0);
+-- Predictions Table
+CREATE TABLE predictions (
+    prediction_id INT AUTO_INCREMENT PRIMARY KEY,
+    customer_id VARCHAR(50),
+    prediction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    adoption_probability DECIMAL(5, 4),
+    predicted_spending DECIMAL(10, 2),
+    customer_segment VARCHAR(50),
+    model_version VARCHAR(20),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
 
--- Query high-value prospects
+-- Transactions Table
+CREATE TABLE transactions (
+    transaction_id INT AUTO_INCREMENT PRIMARY KEY,
+    customer_id VARCHAR(50),
+    transaction_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    amount DECIMAL(10, 2),
+    products TEXT,
+    kiosk_location VARCHAR(100),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+);
+
+-- Sample Queries
+
+-- 1. Get high-value prospects
 SELECT 
-    customer_id,
-    adoption_probability,
-    predicted_spending,
-    cluster_segment
-FROM refillhub_predictions
-WHERE adoption_probability > 0.7
-    AND predicted_spending > {df['Willingness_to_Pay_AED'].median():.2f}
-ORDER BY predicted_spending DESC
+    c.customer_id,
+    c.emirate,
+    c.income_level,
+    p.adoption_probability,
+    p.predicted_spending,
+    p.customer_segment
+FROM customers c
+JOIN predictions p ON c.customer_id = p.customer_id
+WHERE p.adoption_probability > 0.7
+    AND p.predicted_spending > {df['Willingness_to_Pay_AED'].median():.2f}
+ORDER BY p.predicted_spending DESC
 LIMIT 100;
+
+-- 2. Customer segmentation distribution
+SELECT 
+    customer_segment,
+    COUNT(*) as segment_size,
+    AVG(adoption_probability) as avg_adoption,
+    AVG(predicted_spending) as avg_spending
+FROM predictions
+WHERE prediction_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+GROUP BY customer_segment
+ORDER BY avg_spending DESC;
+
+-- 3. Revenue forecast by emirate
+SELECT 
+    c.emirate,
+    COUNT(DISTINCT c.customer_id) as potential_customers,
+    SUM(p.predicted_spending) as estimated_monthly_revenue,
+    AVG(p.adoption_probability) as avg_adoption_rate
+FROM customers c
+JOIN predictions p ON c.customer_id = p.customer_id
+WHERE p.adoption_probability > 0.5
+GROUP BY c.emirate
+ORDER BY estimated_monthly_revenue DESC;
+
+-- 4. Track prediction accuracy
+SELECT 
+    p.model_version,
+    COUNT(*) as predictions_made,
+    AVG(CASE 
+        WHEN t.amount IS NOT NULL AND p.adoption_probability > 0.5 THEN 1
+        WHEN t.amount IS NULL AND p.adoption_probability <= 0.5 THEN 1
+        ELSE 0
+    END) as accuracy
+FROM predictions p
+LEFT JOIN transactions t ON p.customer_id = t.customer_id
+    AND t.transaction_date > p.prediction_date
+WHERE p.prediction_date >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+GROUP BY p.model_version;
 '''
-            st.code(sql_template, language='sql')
             
+            st.code(sql_code, language='sql')
             st.download_button(
-                label="📥 Download SQL Template",
-                data=sql_template,
+                label="📥 Download SQL Queries",
+                data=sql_code,
                 file_name="database_queries.sql",
-                mime="text/plain"
+                mime="text/plain",
+                use_container_width=True
             )
-            
-            st.markdown("#### Sample API Request (cURL)")
-            
-            curl_example = '''
-curl -X POST http://localhost:5000/predict \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "Age_Group": "25-34",
-    "Income": "10000-15000",
-    "Emirate": "Dubai",
-    "Importance_Sustainability": 4,
-    "Importance_Price": 3,
-    "Importance_Convenience": 4
-  }'
-'''
-            st.code(curl_example, language='bash')
 
 if __name__ == "__main__":
     main()
